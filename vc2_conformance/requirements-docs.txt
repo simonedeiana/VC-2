@@ -1,0 +1,5 @@
+sphinx
+numpydoc
+sphinxcontrib-svg2pdfconverter
+sphinxcontrib-programoutput
+sphinxcontrib-intertex

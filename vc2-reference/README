@@ -1,0 +1,39 @@
+VC-2 Reference Encoder and Decoder
+----------------------------------
+
+Copyright (C) Tim Borer, James Weaver and Galen Reich 2010-2020,
+British Broadcasting Corporation.
+< galen.reich@bbc.co.uk >
+
+
+This repository contains a SMPTE 2042-1 VC-2 reference encoder and
+decoder. It can be compiled using autotools on Linux or Windows and
+includes the following executables once compiled:
+
+ o EncodeStream -- an encoder which will encode a VC-2 compliant stream
+   using one of the supported LD or HQ profiles.
+ o DecodeStream -- a decoder which will decode a VC-2 compliant stream
+   which complies with the LD or HQ profiles.
+
+The EncodeStream tool supports the following profiles:
+ o HQ_CBR -- an encoder for the High Quality (HQ) profile of
+   VC-2 which encodes at a constant bit rate.
+ o HQ_ConstQ -- an encoder for the High Quality (HQ) profile of
+   VC-2 which encodes with a constant quantiser value.
+ o LD -- an OBSOLETE encoder for the Low Delay (LD) profile of VC-2.
+   (included for backwards compatibility).
+
+In addition, an optional utility (DecodeFrame) is includeded which
+takes in the compressed bytes of a VC-2 frame without any surrounding
+headers. This is not compiled by default but can be enabled with the
+--enable-frame-decoder flag (./configure --enable-frame-decoder).
+
+The googletest testing framework can be used to run tests on the
+repository. This requires the googletest submodule to be added by
+  git submodule init
+  git submodule update
+(or using --recurse-submodules when cloning)
+Then using `make check' to build and run the tests.
+
+Additional help on each executable will be printed if it is run with
+the --help parameter.

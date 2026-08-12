@@ -1,0 +1,23 @@
+# Local copies of the original repositories' Git metadata.
+/.upstream-git/
+
+# Reproducible dependencies, environments, and build/install trees.
+/.vcpkg_installed/
+/.venv-validator/
+/build-msvc/
+/artifacts/
+
+# Generated benchmark and codec output.
+/*.vc2
+/picture_*.raw
+/picture_*.json
+
+# Profiler captures; retain the Markdown reports.
+/profiles/*.etl
+/profiles/*.csv
+/profiles/*.xml
+
+# Common local caches.
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
