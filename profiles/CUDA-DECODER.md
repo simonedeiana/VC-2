@@ -37,11 +37,17 @@ single-picture Haar-1 and 720p Haar-0 decodes also match exactly.
 
 | CUDA work | Per picture |
 |---|---:|
-| Frame upload (whole compressed frame, frame-relative offsets) | ~0.2 ms |
+| Frame upload (whole compressed frame, frame-relative offsets) | ~0.22 ms |
 | Coefficient plane zeroing (two memsets) | ~0.08 ms |
 | VLC kernel (one lane per stream, 24,300 streams) | ~1.6-1.7 ms |
 | Inverse transform kernel (one warp per slice) | ~1.0 ms |
-| Output downloads (Y 4.1 MB + Cb/Cr 2.1 MB each) | ~1.1 ms |
+| Output downloads (Y 4.1 MB + Cb/Cr 2.1 MB each, overlapped) | ~0.6 ms |
+
+The output download went from ~1.3 ms to ~0.6 ms by pinning a persistent
+staging buffer once and issuing the three plane downloads on separate
+streams (all gated on one event) so they overlap instead of serializing on
+the decode stream; a host memcpy then moves each plane into the caller's
+buffer.
 
 Nsight Compute counters remain unavailable (non-administrator counter access
 is disabled, `ERR_NVGPUCTRPERM`), so the kernels were tuned with Nsight
@@ -74,9 +80,21 @@ the inverse transform is slice-local. The backend therefore:
 - Uploading the whole frame instead of a packed payload copy removed the
   per-frame `std::vector` payload build (24,300 inserts) and roughly halved
   the host-side gap between frames.
-- Pinning the caller's output buffers was rejected: the benchmark tool
-  rotates output buffers every frame, so re-registering cost ~1.5 ms per
-  frame (60 `cudaHostRegister` calls over 20 frames).
+- Pinning the caller's output buffers directly was rejected: the benchmark
+  tool rotates output buffers every frame, so re-registering cost ~1.5 ms per
+  frame (60 `cudaHostRegister` calls over 20 frames). Instead the downloads
+  land in persistent pinned staging buffers (registered once) that are then
+  memcpy'd to the caller's planes; a plain 8 MB write to the caller's
+  pageable buffers costs ~1.8 ms because the OS evicts the 250 MB of rotated
+  output buffers between uses, so writing the caller's buffer directly was
+  not the win it looked like.
+- The frame upload was staged through a persistent pinned buffer
+  (`cudaMallocHost` + memcpy once), cutting the H2D from ~0.58 ms to
+  ~0.22 ms, and the transform kernel got `__launch_bounds__(128, 12)`
+  (40 registers, neutral but kept as headroom).
+- Grouping VLC streams by component (all Y first, then chroma) regressed
+  (1.99 ms vs 1.66 ms): the natural interleaved layout keeps each warp's
+  payload reads within ~11 consecutive slices, which the reordering lost.
 - Interleaving two independent streams per VLC lane (the ILP trick that won
   on the CPU decoder) regressed 127 to 115 fps on the GPU: warp-level
   parallelism already hides the LUT-load latency, and the extra decode state

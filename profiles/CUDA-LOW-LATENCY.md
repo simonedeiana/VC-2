@@ -20,9 +20,13 @@ are never multiple pictures in flight.
 | AVX2 encoder, 720p | ~334 fps | ~2.99 ms | <1 ms |
 | CUDA fused encoder, 720p | ~348 fps median | ~2.87 ms | <1 ms |
 | AVX2 encoder, 1080p | 166-171 fps | 5.85-6.02 ms | <2 ms |
-| CUDA fused encoder, 1080p | ~225 fps median | ~4.44 ms | <2 ms |
+| CUDA fused encoder, 1080p | ~244 fps median | ~4.10 ms | <2 ms |
 | AVX2 decoder, 720p | ~408 fps median | ~2.45 ms | <1 ms |
 | AVX2 decoder, 1080p | ~235 fps median | ~4.25 ms | <2 ms |
+
+(Measured with the latest round of encoder optimizations; the 1080p CUDA
+encoder went from ~190 fps at the start of the round to ~244 fps median,
+~1.56x the 12-thread AVX2 encoder.)
 
 The retained encoder keeps coefficients resident and performs transform,
 quantizer selection, VLC generation, and complete fixed-size slice
@@ -37,12 +41,12 @@ The final 60-picture 1080p capture is `cuda-metric-reuse.nsys-rep`:
 
 | CUDA work | Per picture |
 |---|---:|
-| Tiled transform kernels (3 launches) | ~0.66 ms GPU time |
-| Quantizer selector | ~0.69 ms GPU time |
-| Warp-parallel VLC serializer | ~0.50 ms GPU time |
-| Host-to-device copies (summed; three planes overlap) | ~0.71 ms GPU time |
-| Compressed device-to-host copy | ~0.20 ms GPU time |
-| One stream synchronization | ~2.93 ms API time |
+| Transform kernels (one warp per tile, 3 launches) | ~0.24 ms GPU time |
+| Quantizer selector | ~0.80 ms GPU time |
+| Warp-parallel VLC serializer | ~0.70 ms GPU time |
+| Host-to-device copies (summed; three planes overlap) | ~0.60 ms GPU time |
+| Compressed device-to-host copy | ~0.16 ms GPU time |
+| One stream synchronization | ~3.5 ms API time |
 
 Nsight Compute counters are unavailable because NVIDIA performance-counter
 access is disabled for non-administrator users (`ERR_NVGPUCTRPERM`). Nsight
@@ -70,6 +74,20 @@ transfers already exceed 2 ms on this GPU before application overhead.
 - CUDA events and a dedicated encoding stream removed intermediate host
   synchronization. A tiled depth-3 Haar kernel reduced 18 transform launches
   to three, although transform compute time remained around 0.66 ms.
+- The quantiser selector's candidate loop is invariant in its matrix for
+  qi >= 32 (the loop steps by 8, so qindex = 28+(qi&3) is fixed): hoisting the
+  loop-invariant `((v*m)>>16 + v) >> sh` out of the loop (and only recomputing
+  the qshift) removed all plane/matrix re-reads from the search iterations
+  (~+12-17% end to end).
+- Replacing the shared-memory tiled depth-3 Haar with one warp per 8x8 tile
+  using register shuffles removed all `__syncthreads` and shared memory: Y
+  transform 431 -> 235 us, chroma 216 -> 112 us (~+12% end to end). The
+  multi-resolution levels only touch the LL subband (even rows/cols), so the
+  deeper passes update only those lanes.
+- `__launch_bounds__(256, 4)` on the selector cut registers 72 -> 64 (3 -> 4
+  resident blocks) and the kernel 968 -> 805 us.
+- Packing the (multiplier, shift) matrix pair into one uint32 and reading one
+  packed word instead of two arrays was neutral and was reverted.
 
 ## Boundary and next work
 
