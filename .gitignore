@@ -8,6 +8,7 @@
 /build-profile/
 /build-lto/
 /build-cuda/
+/build/
 /artifacts/
 /out/
 
@@ -26,6 +27,8 @@
 /profiles/*.vc2
 /profiles/*.raw
 /profiles/*.nsys-rep
+/profiles/*.ncu-rep
+/profiles/*.qdstrm
 /profiles/*.sqlite
 
 # Common local caches.
