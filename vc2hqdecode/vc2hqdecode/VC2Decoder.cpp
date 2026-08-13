@@ -37,12 +37,18 @@
 
 #include <stdexcept>
 #include <cstdio>
+#include <cstdlib>
 #include <string.h>
+#include <vector>
 
 #include "logger.hpp"
 #include "stream.hpp"
 
 #include "platform_variant.hpp"
+
+#ifdef VC2_ENABLE_CUDA
+#include "vc2invtransform_cuda/decode_cuda.hpp"
+#endif
 
 #ifdef DEBUG
 #include <sys/types.h>
@@ -80,6 +86,25 @@ static bool HAS_SSE4_2 = false;
 static bool HAS_AVX = false;
 static bool HAS_AVX2 = false;
 
+#ifdef VC2_ENABLE_CUDA
+static bool USE_CUDA_DECODE = false;
+
+// Exposes the CPU VLC lookup table to the CUDA layer (decode_cuda.cu uploads
+// a byte-exact copy to device memory). The CPU LUTEntry is declared
+// ALIGNED(32), so each array element occupies 32 bytes while only the first
+// 16 carry the state fields; compact the table to 16-byte entries once so
+// the device copy is dense.
+extern "C" const void *vc2_cpu_vlclut() {
+  static uint8_t compact[1024 * 16];
+  static bool built = false;
+  if (!built) {
+    for (int i = 0; i < 1024; i++)
+      memcpy(compact + i * 16, (const uint8_t *)&VLCLUT[i], 16);
+    built = true;
+  }
+  return (const void *)compact;
+}
+#endif
 
 void detect_cpu_features() {
   __detect_cpu_features(HAS_SSE4_2, HAS_AVX, HAS_AVX2);
@@ -677,10 +702,23 @@ void VC2Decoder::setParams(VC2DecoderParamsInternal &params) {
     delete[] mSliceJobLUTY;
   }
 
+#ifdef VC2_ENABLE_CUDA
+  {
+    const char *cuda_setting = std::getenv("VC2HQ_CUDA");
+    USE_CUDA_DECODE = cuda_setting && cuda_setting[0] != '\0' && cuda_setting[0] != '0' &&
+                      vc2_cuda_decode_available();
+    if (USE_CUDA_DECODE)
+      writelog(LOG_INFO, "  CUDA decoder [X]");
+  }
+#endif
+
 #ifndef DEBUG_ONE_JOB
   int n_threads = params.threads;
   int n_jobs = 1;
-  for (n_jobs = 1; n_jobs < 4 * n_threads; n_jobs <<= 1);
+#ifdef VC2_ENABLE_CUDA
+  if (!USE_CUDA_DECODE)
+#endif
+    for (n_jobs = 1; n_jobs < 4 * n_threads; n_jobs <<= 1);
 #else
   int n_threads = 1;
   int n_jobs = 1;
@@ -935,6 +973,48 @@ void VC2Decoder::setParams(VC2DecoderParamsInternal &params) {
 
   mSampleSize = sample_size;
 
+#ifdef VC2_ENABLE_CUDA
+  if (USE_CUDA_DECODE) {
+    const bool supported =
+      (params.transform_params.wavelet_index == VC2DECODER_WFT_HAAR_NO_SHIFT ||
+       params.transform_params.wavelet_index == VC2DECODER_WFT_HAAR_SINGLE_SHIFT) &&
+      params.transform_params.wavelet_depth == 3 &&
+      slice_width == 32 && slice_height == 8 &&
+      !mInterlaced && !mParams.partial_decode &&
+      !mParams.colourise;
+    if (!supported) {
+      writelog(LOG_INFO, "  CUDA decoder preset unsupported; using CPU");
+      USE_CUDA_DECODE = false;
+    } else {
+      const int levels = params.transform_params.wavelet_depth + 1;
+      std::vector<int32_t> qf(static_cast<size_t>(256) * levels * 4);
+      std::vector<int32_t> qo(static_cast<size_t>(256) * levels * 4);
+      for (int q = 0; q < 256; q++) {
+        for (int l = 0; l < levels; l++) {
+          for (int s = 0; s < 4; s++) {
+            qf[static_cast<size_t>((q*levels + l)*4 + s)] = ((const int32_t *)&mMatrices[q].qfactor[l][s])[0];
+            qo[static_cast<size_t>((q*levels + l)*4 + s)] = ((const int32_t *)&mMatrices[q].qoffset[l][s])[0];
+          }
+        }
+      }
+      const int out_width[3]  = { mWidth, mWidth/2, mWidth/2 };
+      const int out_height[3] = { mHeight, mHeight, mHeight };
+      const int plane_stride[3] = { mSlicesX*slice_width,
+                                    mSlicesX*(slice_width/2),
+                                    mSlicesX*(slice_width/2) };
+      const int active_bits = (mOutputFormat.signal_range == VC2DECODER_PSR_12BITVID) ? 12 : 10;
+      const int wshift = (params.transform_params.wavelet_index == VC2DECODER_WFT_HAAR_SINGLE_SHIFT) ? 1 : 0;
+      if (!vc2_cuda_decode_prepare(mSlicesX, mSlicesY, slice_width, slice_height, 3,
+                                   wshift, active_bits, out_width, out_height, plane_stride,
+                                   qf.data(), qo.data(), levels)) {
+        writelog(LOG_WARN, "CUDA decoder preparation failed; using CPU: %s",
+                 vc2_cuda_decode_last_error());
+        USE_CUDA_DECODE = false;
+      }
+    }
+  }
+#endif
+
 #ifdef DEBUG_P_BLOCK
   DEBUG_P_SLICE_W = (DEBUG_P_COMP == 0) ? slice_width : slice_width / 2;
   DEBUG_P_SLICE_H = slice_height;
@@ -1049,6 +1129,36 @@ uint64_t VC2Decoder::decodeFrame(char *_idata, int ilength, uint16_t **odata, in
 
   // Now decode the frame
   uint64_t length = SliceInput((char *)idata, ilength - preamble, mJobs);
+
+#ifdef VC2_ENABLE_CUDA
+  if (USE_CUDA_DECODE) {
+    // The CUDA backend processes the complete picture as one job: gather the
+    // parsed slices into a flat table plus packed payload and let the GPU
+    // fuse VLC decode, dequantization, inverse transform and pixel output.
+    JobData *job = mJobs[0];
+    const int n_slices = job->slices_x * job->slices_y;
+    std::vector<VC2CudaSlice> table(static_cast<size_t>(n_slices));
+    const uint8_t *frame = (const uint8_t *)_idata;
+    for (int n = 0; n < n_slices; n++) {
+      CodedSlice &cs = job->coded_slices[n];
+      table[n].qindex = cs.qindex;
+      for (int c = 0; c < 3; c++) {
+        // Slice data pointers live inside the frame buffer, so upload the
+        // whole frame and reference the streams by offset.
+        table[n].offset[c] = static_cast<int32_t>((const uint8_t *)cs.data[c] - frame);
+        table[n].length[c] = cs.length[c];
+      }
+    }
+    if (!vc2_cuda_decode_picture(table.data(), n_slices, mSlicesX, mSlicesY,
+                                 frame, static_cast<size_t>(preamble) + length,
+                                 odata, ostride)) {
+      writelog(LOG_ERROR, "CUDA decode failed: %s", vc2_cuda_decode_last_error());
+      throw VC2DECODER_DECODE_FAILED;
+    }
+    mSequenceInfo.pictures_decoded++;
+    return length;
+  }
+#endif
 
 #ifndef DEBUG
   if (mThreads > 1) {

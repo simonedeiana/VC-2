@@ -65,10 +65,36 @@ so further launch-level tuning cannot reach the 1080p target. A newer GPU, a
 persistent-kernel design, or GPU-native input/output surfaces is required for a
 credible attempt at that ceiling.
 
-The decoder remains CPU-only. A useful CUDA decoder must fuse VLC decoding,
-dequantization, inverse transform, and final pixel output; inverse-transform
-offload alone repeats the transfer-bound failure of the original encoder
-prototype. Multiple pictures in flight remain explicitly out of scope.
+## CUDA decoder
+
+A fused CUDA decoder backend is available for the same preset (Haar-0/Haar-1,
+depth 3, 32x8 slices, planar 10-bit/12-bit 4:2:2). It is opt-in with the same
+`VC2HQ_CUDA=1` environment switch and decodes the whole picture as one job:
+
+- Kernel 1 decodes every component VLC stream (three per slice, 24,300
+  streams for 1080p) with one lane per stream and dequantizes each coefficient
+  inline straight into the coefficient plane. The decode LUT lives in
+  read-only global memory so 32 divergent per-warp lookups do not serialize on
+  the constant cache.
+- Kernel 2 runs the slice-local inverse Haar transform and writes clipped
+  pixels to the output planes; only pixels cross back over PCIe.
+- The compressed frame is uploaded directly (slice offsets are
+  frame-relative), and the coefficient planes are zeroed per picture so
+  undecoded coefficients stay zero.
+
+On the GTX 1050 Ti test system, the 1080p decoder reaches about
+125-140 fps steady state (roughly 7-8 ms per picture) versus 36-40 fps for the
+single-threaded CPU decoder, and 720p reaches about 209 fps versus 108 fps.
+Output is byte-for-byte identical to the CPU decoder: a 30-picture 1080p
+Haar-0 decode matches the CPU SHA-256 exactly
+(`48a27492179d8c7181fd99508cc1b9fd902d6859b9f39bbae10e3a0346e85d46`), and
+Haar-1 and 720p Haar-0 matches are also verified.
+
+Nsight Systems per-frame 1080p measurements: about 1.6-1.7 ms for the VLC
+kernel, 1.0 ms for the transform kernel, 0.2 ms frame upload, and about 1.1 ms
+for the three output downloads. Unsupported layouts, wavelets, slice
+geometries, interlaced streams, partial decode and colourise continue through
+the CPU backend.
 
 Detailed profiler evidence and rejected experiments are in
-`profiles/CUDA-LOW-LATENCY.md`.
+`profiles/CUDA-LOW-LATENCY.md` and `profiles/CUDA-DECODER.md`.

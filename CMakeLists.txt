@@ -167,6 +167,18 @@ foreach(target vc2invtransform_c vc2invtransform_sse)
   target_include_directories(${target} PUBLIC ${decode_root} PRIVATE ${decode_root}/vc2hqdecode)
 endforeach()
 
+if(VC2_ENABLE_CUDA)
+  add_library(vc2invtransform_cuda STATIC
+    ${decode_root}/vc2invtransform_cuda/decode_cuda.cu)
+  target_include_directories(vc2invtransform_cuda PUBLIC ${decode_root} PRIVATE ${decode_root}/vc2hqdecode)
+  target_link_libraries(vc2invtransform_cuda PUBLIC CUDA::cudart)
+  set_target_properties(vc2invtransform_cuda PROPERTIES
+    CUDA_ARCHITECTURES 61
+    CUDA_RUNTIME_LIBRARY Static
+    CUDA_STANDARD 14
+    CUDA_STANDARD_REQUIRED ON)
+endif()
+
 add_library(vc2hqdecode SHARED
   ${decode_root}/vc2hqdecode/vc2hqdecode.cpp
   ${decode_root}/vc2hqdecode/logger.cpp
@@ -176,6 +188,10 @@ add_library(vc2hqdecode SHARED
 target_compile_definitions(vc2hqdecode PRIVATE VC2HQDECODE_DLL ASIO_STANDALONE)
 target_include_directories(vc2hqdecode PUBLIC ${decode_root} PRIVATE ${decode_root}/redist)
 target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_c vc2invtransform_sse)
+if(VC2_ENABLE_CUDA)
+  target_compile_definitions(vc2hqdecode PRIVATE VC2_ENABLE_CUDA=1)
+  target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_cuda)
+endif()
 
 add_executable(vc2decode ${decode_root}/testprogs/vc2decode.cpp)
 target_include_directories(vc2decode PRIVATE ${decode_root} ${decode_root}/testprogs)
