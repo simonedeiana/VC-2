@@ -262,6 +262,18 @@ in one interleaved loop.
   The 1-job path is only compiled with `DEBUG_ONE_JOB` (the `debug.hpp`
   include sits inside `#ifdef DEBUG`, so it never reaches Release builds);
   it could not be validated byte-exact, so it was reverted.
+- **Matched-length stream grouping** (decode three adjacent slices' same
+  component together — `x3(Y_a,Y_b,Y_c)`, `x3(C1_a,C1_b,C1_c)`, ...): the
+  literature-driven idea that grouping same-length streams maximises the
+  interleaved window. The per-slice `x3(Y,C1,C2)` interleaves Y (256 coeffs)
+  with the shorter chroma (128 each), so its 3-way loop covers only the first
+  half and the Y tail decodes solo. Grouping by component removes that drain,
+  but it scatters the input reads: the bitstream is slice-major, so three
+  slices' Y streams are a full slice apart and defeat the sequential
+  prefetcher. **-3.5% regression** in a same-session A/B (63.8 vs 61.5 fps).
+  Reverted; the per-slice grouping keeps the contiguous Y/C1/C2 input, which
+  wins over the drain elimination. (Required sizing all scratch buffers to
+  the largest component; also reverted.)
 
 ## Verification
 
