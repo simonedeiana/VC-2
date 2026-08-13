@@ -7,11 +7,17 @@
 
 namespace vc2hq_stage_profile {
 
+// Plain namespace-scope flag (initialised before main) so enabled() is a single
+// load. A function-local static would carry MSVC's thread-safe-init guard
+// (_Init_thread_header) on every hot-path Scope call.
+static const bool vc2hq_profile_enabled = (std::getenv("VC2HQ_PROFILE") != nullptr);
+
 enum Stage {
   INPUT_HORIZONTAL,
   VERTICAL_WAVELET,
   HORIZONTAL_WAVELET,
-  QUANTISE_ENTROPY,
+  QUANTISE_SEARCH,
+  QUANTISE_ENCODE,
   SERIALISE,
   STAGE_COUNT
 };
@@ -27,8 +33,7 @@ inline std::atomic<unsigned long long> *calls() {
 }
 
 inline bool enabled() {
-  static const bool value = std::getenv("VC2HQ_PROFILE") != nullptr;
-  return value;
+  return vc2hq_profile_enabled;
 }
 
 inline void report() {
@@ -36,7 +41,8 @@ inline void report() {
     "input+horizontal-L0",
     "vertical-wavelet",
     "horizontal-wavelet-L1+",
-    "quantise+entropy",
+    "quantiser-search",
+    "quantise+encode",
     "serialise"
   };
   if (!enabled())

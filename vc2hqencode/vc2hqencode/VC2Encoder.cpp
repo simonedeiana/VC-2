@@ -965,11 +965,8 @@ template<class T> void VC2Encoder::EncodePartial(partial_encode_data *data) {
   uint32_t *final_offset = &data->final_offset;
   int sx = data->sx;
   int sy = data->sy;
-  /* First Encode Pass */
-  {
-    vc2hq_stage_profile::Scope profile(vc2hq_stage_profile::QUANTISE_ENTROPY);
-    Encode<T>(slices, n_slices, olength);
-  }
+  /* First Encode Pass (fine-grained search/encode scopes live inside encode_slices) */
+  Encode<T>(slices, n_slices, olength);
 
 #ifdef DEBUG_OP_QI
   {

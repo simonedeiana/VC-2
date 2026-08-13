@@ -27,6 +27,7 @@
 #include "internal.h"
 #include "vlc.hpp"
 #include "../vc2inversetransform_c/vlc_c.hpp"
+#include "stage_profile.hpp"
 #include <cstdio>
 #include <immintrin.h>
 
@@ -146,24 +147,28 @@ template<class T> void decode_slices_sse4_2(QuantisationMatrix *matrices,
     for (int X = 0; X < n_slices_x; X++) {
       const int n = Y*n_slices_x + X;
       int padding = 0;
-      padding += decode_sse4_2((uint8_t *)input[n].data[0], input[n].length[0], scratch[0]->data, scratch[0]->size);
-      _mm_prefetch((char *)&matrices[input[n].qindex], _MM_HINT_T0);
-      _mm_prefetch((char *)&video_data[0]->as<T>()[Y*slice_height*video_data[0]->stride + X*slice_width], _MM_HINT_T0);
-      dequant[0](&matrices[input[n].qindex], scratch[0]->data,
-                 &video_data[0]->as<T>()[Y*slice_height*video_data[0]->stride + X*slice_width], video_data[0]->stride,
-                 slice_width, slice_height, depth);
-
-      padding += decode_sse4_2((uint8_t *)input[n].data[1], input[n].length[1], scratch[1]->data, scratch[1]->size);
-      _mm_prefetch((char *)&video_data[1]->as<T>()[Y*slice_height*video_data[1]->stride + X*slice_width], _MM_HINT_T0);
-      dequant[1](&matrices[input[n].qindex], scratch[1]->data,
-                 &video_data[1]->as<T>()[Y*slice_height*video_data[1]->stride + X*slice_width/2], video_data[1]->stride,
-                 slice_width/2, slice_height, depth);
-
-      padding += decode_sse4_2((uint8_t *)input[n].data[2], input[n].length[2], scratch[2]->data, scratch[2]->size);
-      _mm_prefetch((char *)&video_data[2]->as<T>()[Y*slice_height*video_data[2]->stride + X*slice_width], _MM_HINT_T0);
-      dequant[2](&matrices[input[n].qindex], scratch[2]->data,
-                 &video_data[2]->as<T>()[Y*slice_height*video_data[2]->stride + X*slice_width/2], video_data[2]->stride,
-                 slice_width/2, slice_height, depth);
+      {
+        vc2hq_stage_profile::Scope profile(vc2hq_stage_profile::VLC_DECODE);
+        padding += decode_sse4_2((uint8_t *)input[n].data[0], input[n].length[0], scratch[0]->data, scratch[0]->size);
+        padding += decode_sse4_2((uint8_t *)input[n].data[1], input[n].length[1], scratch[1]->data, scratch[1]->size);
+        padding += decode_sse4_2((uint8_t *)input[n].data[2], input[n].length[2], scratch[2]->data, scratch[2]->size);
+      }
+      {
+        vc2hq_stage_profile::Scope profile(vc2hq_stage_profile::DEQUANTISE);
+        _mm_prefetch((char *)&matrices[input[n].qindex], _MM_HINT_T0);
+        _mm_prefetch((char *)&video_data[0]->as<T>()[Y*slice_height*video_data[0]->stride + X*slice_width], _MM_HINT_T0);
+        dequant[0](&matrices[input[n].qindex], scratch[0]->data,
+                   &video_data[0]->as<T>()[Y*slice_height*video_data[0]->stride + X*slice_width], video_data[0]->stride,
+                   slice_width, slice_height, depth);
+        _mm_prefetch((char *)&video_data[1]->as<T>()[Y*slice_height*video_data[1]->stride + X*slice_width], _MM_HINT_T0);
+        dequant[1](&matrices[input[n].qindex], scratch[1]->data,
+                   &video_data[1]->as<T>()[Y*slice_height*video_data[1]->stride + X*slice_width/2], video_data[1]->stride,
+                   slice_width/2, slice_height, depth);
+        _mm_prefetch((char *)&video_data[2]->as<T>()[Y*slice_height*video_data[2]->stride + X*slice_width], _MM_HINT_T0);
+        dequant[2](&matrices[input[n].qindex], scratch[2]->data,
+                   &video_data[2]->as<T>()[Y*slice_height*video_data[2]->stride + X*slice_width/2], video_data[2]->stride,
+                   slice_width/2, slice_height, depth);
+      }
 
       input[n].padding = padding;
 

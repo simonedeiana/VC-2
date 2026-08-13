@@ -31,6 +31,15 @@
 /profiles/*.qdstrm
 /profiles/*.sqlite
 
+# Round-2 benchmark + profiling artifacts.
+/build-profenc/
+/bench/baseline/
+/bench/*.out
+/bench/*.out.err
+/bench/*.vc2
+/bench/*.yuv
+/bench/vtune-*/
+
 # Common local caches.
 **/__pycache__/
 **/.pytest_cache/

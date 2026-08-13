@@ -56,6 +56,112 @@ template<>void Haar_invtransform_V_inplace_sse4_2<1>(void *_idata,
   }
 }
 
+// Haar inverse vertical transform, 16-bit samples. Only the columns belonging
+// to this level's horizontal subband are updated; the rest are preserved via a
+// lane blend (mirrors the scalar Haar_invtransform_V_inplace<skip, int16_t>).
+template<int skip> void Haar_invtransform_V_inplace_sse4_2_int16_t(void *_idata,
+                                                                  const int istride,
+                                                                  const int width,
+                                                                  const int height) {
+  int16_t *idata = (int16_t *)_idata;
+  const __m128i ONE = _mm_set1_epi16(1);
+  // Valid 16-bit lanes within each 8-wide vector for this level's subband.
+  const int MASK = (skip == 1) ? 0xFF : ((skip == 2) ? 0x55 : ((skip == 4) ? 0x11 : 0x01));
+  for (int y = 0; y < height; y += 2*skip) {
+    for (int x = 0; x < width; x += 8) {
+      __m128i D0 = _mm_load_si128((__m128i *)&idata[(y + 0*skip)*istride + x]);
+      __m128i D1 = _mm_load_si128((__m128i *)&idata[(y + 1*skip)*istride + x]);
+
+      __m128i X0 = _mm_sub_epi16(D0, _mm_srai_epi16(_mm_add_epi16(D1, ONE), 1));
+      __m128i X1 = _mm_add_epi16(D1, X0);
+
+      _mm_store_si128((__m128i *)&idata[(y + 0*skip)*istride + x], _mm_blend_epi16(D0, X0, MASK));
+      _mm_store_si128((__m128i *)&idata[(y + 1*skip)*istride + x], _mm_blend_epi16(D1, X1, MASK));
+    }
+  }
+}
+
+// Haar inverse horizontal transform at the finest level (skip == 1), 16-bit
+// samples. De-interleaves even/odd samples, filters, and interleaves back
+// (mirrors the scalar Haar_invtransform_H_inplace<1, shift, int16_t>).
+template<int shift> void Haar_invtransform_H_inplace_1_sse4_2_int16_t(void *_idata,
+                                                                     const int istride,
+                                                                     const int width,
+                                                                     const int height) {
+  int16_t *idata = (int16_t *)_idata;
+  const __m128i ONE = _mm_set1_epi16(1);
+  const __m128i SHUF = _mm_set_epi8(15,14, 11,10, 7,6, 3,2,
+                                    13,12,  9,8, 5,4, 1,0);
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x += 16) {
+      __m128i D0 = _mm_load_si128((__m128i *)&idata[y*istride + x + 0]);
+      __m128i D8 = _mm_load_si128((__m128i *)&idata[y*istride + x + 8]);
+
+      D0 = _mm_shuffle_epi8(D0, SHUF);
+      D8 = _mm_shuffle_epi8(D8, SHUF);
+
+      __m128i E = _mm_unpacklo_epi64(D0, D8);   // even samples
+      __m128i O = _mm_unpackhi_epi64(D0, D8);   // odd samples
+
+      __m128i X0 = _mm_sub_epi16(E, _mm_srai_epi16(_mm_add_epi16(O, ONE), 1));
+      __m128i X1 = _mm_add_epi16(O, X0);
+
+      if (shift != 0) {
+        X0 = _mm_srai_epi16(_mm_add_epi16(X0, ONE), shift);
+        X1 = _mm_srai_epi16(_mm_add_epi16(X1, ONE), shift);
+      }
+
+      __m128i R0 = _mm_unpacklo_epi16(X0, X1);
+      __m128i R8 = _mm_unpackhi_epi16(X0, X1);
+
+      _mm_store_si128((__m128i *)&idata[y*istride + x + 0], R0);
+      _mm_store_si128((__m128i *)&idata[y*istride + x + 8], R8);
+    }
+  }
+}
+
+// Haar inverse horizontal transform for coarser levels (skip 2 and 4),
+// 16-bit samples. The sample pairs are strided by `skip`; only those lanes are
+// updated, the rest are preserved via a lane blend. Each 128-bit vector holds
+// 8 samples, so skip == 8 pairs (spanning two vectors) are left to the C path.
+template<int skip, int shift> void Haar_invtransform_H_inplace_sse4_2_int16_t(void *_idata,
+                                                                             const int istride,
+                                                                             const int width,
+                                                                             const int height) {
+  int16_t *idata = (int16_t *)_idata;
+  const __m128i ONE = _mm_set1_epi16(1);
+  // Extract the low (D) and high (P) subband lanes of each 8-wide vector.
+  const __m128i SHUF_D = (skip == 2) ? _mm_setr_epi8(0,1, 8,9, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80)
+                       : _mm_setr_epi8(0,1, 0x80,0x80,0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80);
+  const __m128i SHUF_P = (skip == 2) ? _mm_setr_epi8(4,5, 12,13, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80)
+                       : _mm_setr_epi8(8,9, 0x80,0x80,0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80);
+  // Scatter the interleaved results back onto the valid lanes.
+  const __m128i SPREAD = (skip == 2) ? _mm_setr_epi8(0,1, 0x80,0x80, 2,3, 0x80,0x80, 4,5, 0x80,0x80, 6,7, 0x80,0x80)
+                       : _mm_setr_epi8(0,1, 0x80,0x80,0x80,0x80,0x80,0x80, 2,3, 0x80,0x80,0x80,0x80,0x80,0x80);
+  const int BLEND = (skip == 2) ? 0x55 : 0x11;
+  for (int y = 0; y < height; y += skip) {
+    for (int x = 0; x < width; x += 8) {
+      __m128i D16 = _mm_load_si128((__m128i *)&idata[y*istride + x]);
+
+      __m128i D = _mm_shuffle_epi8(D16, SHUF_D);
+      __m128i P = _mm_shuffle_epi8(D16, SHUF_P);
+
+      __m128i X = _mm_sub_epi16(D, _mm_srai_epi16(_mm_add_epi16(P, ONE), 1));
+      __m128i Y = _mm_add_epi16(P, X);
+
+      if (shift != 0) {
+        X = _mm_srai_epi16(_mm_add_epi16(X, ONE), shift);
+        Y = _mm_srai_epi16(_mm_add_epi16(Y, ONE), shift);
+      }
+
+      __m128i I = _mm_unpacklo_epi16(X, Y);
+      __m128i R = _mm_shuffle_epi8(I, SPREAD);
+
+      _mm_store_si128((__m128i *)&idata[y*istride + x], _mm_blend_epi16(D16, R, BLEND));
+    }
+  }
+}
+
 template<int shift, int active_bits> void Haar_invtransform_H_final_1_sse4_2_int32_t(void *_idata,
 																			   const int istride,
 																			   const char *odata,

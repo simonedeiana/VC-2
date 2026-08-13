@@ -1463,7 +1463,7 @@ void VC2Decoder::Decode(JobData *job, uint16_t **_odata, int *_ostride) {
   int slice_height = (mHeight + mParams.transform_params.slices_y - 1) / mSlicesY;
 
   {
-    vc2hq_stage_profile::Scope profile(vc2hq_stage_profile::ENTROPY_DEQUANTISE);
+    // Fine-grained vlc/dequant scopes live inside the slice decoder.
     mSliceDecoder(mMatrices,
       job->coded_slices,
       job->decoded_slice,

@@ -33,10 +33,11 @@ template<class T> inline uint8_t encode_sample(T *input, uint16_t *output, uint8
   uint32_t d = udiv<uint16_t>(abs(x), m, sh) >> shift;
 
   int s = (x >> 31)&0x1;
-  int l = WLLUT[d];
+  const uint32_t cl = CLWLUT.v[d];
+  const int l = (int)(cl & 0xFF);
 
-  *output    = (CWLUT[d] | s);
-  *lengthout = l;
+  *output    = (uint16_t)(cl >> 16) | (uint16_t)s;
+  *lengthout = (uint8_t)l;
   if (x != 0)
     samples    = (samples < n)?n:samples;
 
