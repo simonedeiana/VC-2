@@ -12,13 +12,21 @@ Windows/WDDM with driver 582.66 and CUDA 12.9.
 
 ## Final retained result
 
-The tool's own steady-state measurement (which excludes process startup):
+The tool's own steady-state measurement (which excludes process startup).
+The `optimizations` branch CPU gains (vectorized Haar inverse transforms and
+interleaved multi-stream VLC decode) were merged into this branch, so the CPU
+numbers below are the optimized decoder.
 
 | Path | 1080p | 720p |
 |---|---:|---:|
-| CPU decoder, 1 thread | 36-40 fps | ~108 fps |
-| CUDA fused decoder | 125-140 fps | ~209 fps |
-| Speedup | ~3.4x | ~1.9x |
+| CPU decoder, 1 thread (optimized) | ~50 fps | ~145 fps |
+| CUDA fused decoder | ~106 fps | ~209 fps |
+| Speedup | ~2.1x | ~1.4x |
+
+(On this machine with its background load the absolute numbers vary between
+sessions; the interleaved A/B ratio is the reliable comparison. Before the
+CPU optimizations were merged, the CPU decoder was 36-40 fps at 1080p and the
+CUDA speedup measured ~3.4x.)
 
 Output is byte-for-byte identical to the CPU decoder. A 30-picture 1080p
 Haar-0 decode matches the CPU SHA-256 exactly

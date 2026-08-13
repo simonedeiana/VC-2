@@ -83,8 +83,10 @@ depth 3, 32x8 slices, planar 10-bit/12-bit 4:2:2). It is opt-in with the same
   undecoded coefficients stay zero.
 
 On the GTX 1050 Ti test system, the 1080p decoder reaches about
-125-140 fps steady state (roughly 7-8 ms per picture) versus 36-40 fps for the
-single-threaded CPU decoder, and 720p reaches about 209 fps versus 108 fps.
+105-110 fps steady state in interleaved A/B runs versus about 50 fps for the
+single-threaded CPU decoder (the CPU-side vectorized transform and interleaved
+VLC optimizations are merged into this branch), and 720p reaches about
+209 fps versus about 145 fps on the CPU.
 Output is byte-for-byte identical to the CPU decoder: a 30-picture 1080p
 Haar-0 decode matches the CPU SHA-256 exactly
 (`48a27492179d8c7181fd99508cc1b9fd902d6859b9f39bbae10e3a0346e85d46`), and
