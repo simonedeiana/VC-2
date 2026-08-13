@@ -211,3 +211,62 @@ The inverse-vertical stage is ~3x faster; VLC is now the sole dominant stage.
   streams.
 - Six of six native CTest targets passed; conformance validator clean.
 
+---
+
+# Round 3 — interleaved multi-stream VLC decode
+
+Date: 2026-08-13
+
+## Result
+
+| Codec | Baseline median | Optimized median | Improvement |
+|---|---:|---:|---:|
+| Decoder (single-thread, 120f) | 66.04 fps | 73.45 fps | **+11.2%** |
+
+Baseline = `bench/baseline/vc2decode.exe` (the round-2 state, saved before
+the VLC changes), pinned to one CPU, AboveNormal priority, nine alternating
+120-frame runs, medians. Byte-identical output (SHA-256 `56e5c487...`).
+
+## What was done
+
+The VLC stage is ~66% of decode time and is **chain-latency bound**: a
+discriminator that stripped the SIMD payload from the decode loop showed the
+serial LUT-latency chain + scalar control is ~76% of the loop, the SIMD
+payload ~24%. The fix hides the serial chain by decoding independent streams
+in one interleaved loop.
+
+- `vlc_step_ex` / `vlc_tail_ex` in `vlc_sse4_2.cpp`: one decode step with the
+  per-stream state passed by reference as scalars (`ic`, `oc`, `V`, `next`) so
+  the compiler keeps it in registers.
+- `decode_sse4_2_x3`: decodes a slice's three components (Y/C1/C2) together —
+  a 3-way interleaved loop (then 2-way, then 1-way drains, then tails).
+- The `decode_slices_sse4_2<T>` driver pairs adjacent slices and keeps each
+  decode→dequant pair adjacent so the three scratch buffers are never reused
+  before their dequant (fixes an earlier clobbering bug).
+- Stage profile (30-frame): vlc-decode 355 ms → ~320 ms at the same total
+  frame count, now 67% of a faster total.
+
+## Rejected experiments
+
+- **Struct-based interleaved state** (`VLCState`): only +3.3%. The 8-field
+  struct spilled to the stack; passing state by reference as scalars kept it
+  in GPRs and delivered the +11.2% above.
+- **AVX2 dequantise** (8-wide `abs/mul/add/shift/sign` for the 32x8x3 and
+  16x8x3 paths): **-5.2% regression** in a same-session interleaved A/B
+  (67.95 vs 71.68 fps), despite the dequant stage itself profiling faster
+  (57.5 vs 72.5 ms). Likely AVX downclocking on this Broadwell-EP Xeon hurting
+  the latency-bound VLC loop. Reverted.
+- **Single-job decode grid** (`n_jobs = 1` for `--threads=1`): +4.6% in
+  same-session A/B, but it changed decoded pixels for the
+  deslauriers-debuc-9-7 wavelet (~9 kbytes near the 4-job grid boundary).
+  The 1-job path is only compiled with `DEBUG_ONE_JOB` (the `debug.hpp`
+  include sits inside `#ifdef DEBUG`, so it never reaches Release builds);
+  it could not be validated byte-exact, so it was reverted.
+
+## Verification
+
+- Decoder pixels SHA-256 identical (`56e5c487...`) for haar0, haar1, LeGall,
+  and deslauriers-debuc-9-7 streams vs `bench/baseline`.
+- Six of six native CTest targets passed; conformance validator clean.
+- Encoder untouched (still `4e45ed1c...` at the same config).
+
