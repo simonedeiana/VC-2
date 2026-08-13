@@ -183,6 +183,86 @@ __global__ void haar0_depth3_tiled_10p2(const uint16_t *input,
   output[gy * output_stride + gx] = tile[ty][tx];
 }
 
+// Depth-3 Haar with one warp per 8x8 tile: the tile lives in registers
+// (two samples per lane) and the horizontal/vertical passes use warp
+// shuffles instead of shared memory + __syncthreads.
+// Lane = row*4 + colpair, holding columns (2*colpair, 2*colpair+1).
+// Level 0 H is local; every other pass is a single __shfl_xor.
+__global__ void haar0_depth3_warp_10p2(const uint16_t *__restrict__ input,
+                                       int input_stride,
+                                       int16_t *__restrict__ output,
+                                       int output_stride,
+                                       int input_width,
+                                       int input_height,
+                                       int output_width,
+                                       int output_height) {
+  const int lane = threadIdx.x;
+  const int row = (lane >> 2) & 7;
+  const int cp = lane & 3;
+  const int gx_raw = blockIdx.x * 8 + 2 * cp;
+  const int gy_raw = blockIdx.y * 8 + row;
+  // Keep every lane in the shuffles: out-of-range lanes compute on clamped
+  // coordinates and simply skip the store.
+  const bool valid = (gx_raw + 1) < output_width && gy_raw < output_height;
+  const int gx = gx_raw < output_width ? gx_raw : output_width - 2;
+  const int gy = gy_raw < output_height ? gy_raw : output_height - 1;
+  const int source_y = gy < input_height ? gy : 2 * input_height - gy - 1;
+  const int pair_x = gx; // even
+  const int spx = pair_x < input_width ? pair_x : 2 * input_width - pair_x - 2;
+  int a = static_cast<int>(input[source_y * input_stride + spx]) - 512;
+  int b = static_cast<int>(input[source_y * input_stride + spx + 1]) - 512;
+
+  // Level 0: H is local (all columns), V pairs rows via xor 4 (all columns).
+  int h = b - a;
+  a = a + ((h + 1) >> 1);
+  b = h;
+  int oa = __shfl_xor_sync(0xffffffff, a, 4);
+  int ob = __shfl_xor_sync(0xffffffff, b, 4);
+  if ((row & 1) == 0) {
+    a = a + ((oa - a + 1) >> 1);
+    b = b + ((ob - b + 1) >> 1);
+  } else {
+    a = a - oa;
+    b = b - ob;
+  }
+  // Level 1 only touches the LL subband: even rows and even columns ('a').
+  // H: even rows, pairs of columns (0,2),(4,6) via xor 1.
+  oa = __shfl_xor_sync(0xffffffff, a, 1);
+  if ((row & 1) == 0) {
+    if ((cp & 1) == 0)
+      a = a + ((oa - a + 1) >> 1);
+    else
+      a = a - oa;
+  }
+  // V: even columns (all 'a'), rows (0,2),(4,6) via xor 8.
+  oa = __shfl_xor_sync(0xffffffff, a, 8);
+  if (row == 0 || row == 4)
+    a = a + ((oa - a + 1) >> 1);
+  else if (row == 2 || row == 6)
+    a = a - oa;
+  // Level 2 only touches the LL-LL subband: rows {0,4}, columns {0,4}.
+  // H: rows {0,4}, columns (0,4) via xor 2.
+  oa = __shfl_xor_sync(0xffffffff, a, 2);
+  if (row == 0 || row == 4) {
+    if (cp == 0)
+      a = a + ((oa - a + 1) >> 1);
+    else if (cp == 2)
+      a = a - oa;
+  }
+  // V: columns {0,4}, rows (0,4) via xor 16.
+  oa = __shfl_xor_sync(0xffffffff, a, 16);
+  if (cp == 0 || cp == 2) {
+    if (row == 0)
+      a = a + ((oa - a + 1) >> 1);
+    else if (row == 4)
+      a = a - oa;
+  }
+  if (valid) {
+    output[gy * output_stride + gx] = static_cast<int16_t>(a);
+    output[gy * output_stride + gx + 1] = static_cast<int16_t>(b);
+  }
+}
+
 __device__ __forceinline__ int coefficient_weight_32x8(int x, int y) {
   if ((x & 7) == 0 && y == 0)
     return 16;
@@ -906,9 +986,8 @@ bool vc2_cuda_haar0_transform_10p2_i16_3plane(
       return false;
 
     if (depth == 3) {
-      const dim3 tiled_threads(8, 8);
-      const dim3 tiled_blocks((output_width[c] + 7) / 8, (output_height[c] + 7) / 8);
-      haar0_depth3_tiled_10p2<<<tiled_blocks, tiled_threads, 0, streams[c]>>>(
+      const dim3 warp_blocks((output_width[c] + 7) / 8, (output_height[c] + 7) / 8);
+      haar0_depth3_warp_10p2<<<warp_blocks, 32, 0, streams[c]>>>(
           device_input[c], input_stride[c], device_output[c], output_stride[c],
           input_width[c], input_height[c], output_width[c], output_height[c]);
     } else {
