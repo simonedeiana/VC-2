@@ -27,6 +27,8 @@
 #include "logger.hpp"
 
 #include <functional>
+#include <cstdlib>
+#include <vector>
 
 #include <stdio.h>
 
@@ -54,6 +56,9 @@ using std::bind;
 #include "vc2transform_avx/transform_avx.hpp"
 #include "vc2transform_avx2/transform_avx2.hpp"
 #endif
+#ifdef VC2_ENABLE_CUDA
+#include "vc2transform_cuda/transform_cuda.hpp"
+#endif
 
 #ifdef DEBUG_P_BLOCK
 static int DEBUG_P_JOB;
@@ -71,6 +76,7 @@ static int DEBUG_P_SLICE_H;
 static bool HAS_SSE4_2 = false;
 static bool HAS_AVX    = false;
 static bool HAS_AVX2   = false;
+static bool USE_CUDA   = false;
 
 GetHTransformInitial get_htransforminitial;
 GetHTransform get_htransform;
@@ -94,6 +100,13 @@ void detect_cpu_features() {
     writelog(LOG_INFO, "  AVX2   [X]");
   else
     writelog(LOG_INFO, "  AVX2   [ ]");
+
+#ifdef VC2_ENABLE_CUDA
+  const char *cuda_setting = std::getenv("VC2HQ_CUDA");
+  USE_CUDA = cuda_setting && cuda_setting[0] != '\0' && cuda_setting[0] != '0' &&
+             vc2_cuda_available();
+  writelog(LOG_INFO, "  CUDA   [%c] (set VC2HQ_CUDA=1 to enable)", USE_CUDA ? 'X' : ' ');
+#endif
 
   get_htransforminitial = get_htransforminitial_c;
   get_htransform = get_htransform_c;
@@ -271,7 +284,13 @@ void VC2Encoder::setParams(VC2EncoderParams &params) throw(VC2EncoderResult){
 
 #ifndef DEBUG_SINGLE_JOB
   mThreads = params.n_threads;
-  for (mJobs = 1; mJobs < params.n_threads*4; mJobs <<= 1);
+  if (USE_CUDA) {
+    // CUDA processes the complete picture as one job. Splitting a single
+    // worker into four CPU-style stripes multiplies transfers and launches.
+    mJobs = 1;
+  } else {
+    for (mJobs = 1; mJobs < params.n_threads*4; mJobs <<= 1);
+  }
 #else
   mThreads = 1;
   mJobs = 1;
@@ -442,6 +461,28 @@ void VC2Encoder::setParams(VC2EncoderParams &params) throw(VC2EncoderResult){
       mJobs = i;
     }
   }
+
+#ifdef VC2_ENABLE_CUDA
+  if (USE_CUDA && mCoefSize == 2 && mJobs == 1 &&
+      mParams.input_format == VC2ENCODER_INPUT_10P2 &&
+      mParams.transform_params.wavelet_index == VC2ENCODER_WFT_HAAR_NO_SHIFT) {
+    JobData<int16_t> *cuda_job = dynamic_cast<JobData<int16_t> *>(mJobData[0]);
+    const int output_stride[3] = { cuda_job->video_data[0]->stride,
+                                   cuda_job->video_data[1]->stride,
+                                   cuda_job->video_data[2]->stride };
+    const int output_height[3] = { cuda_job->video_data[0]->height,
+                                   cuda_job->video_data[1]->height,
+                                   cuda_job->video_data[2]->height };
+    int16_t *output[3] = { cuda_job->video_data[0]->data,
+                           cuda_job->video_data[1]->data,
+                           cuda_job->video_data[2]->data };
+    if (!vc2_cuda_prepare_haar0_10p2_i16(cuda_job->iwidth, cuda_job->iheight,
+                                         output,
+                                         output_stride, output_height))
+      writelog(LOG_WARN, "CUDA preparation failed; first picture will retry: %s",
+               vc2_cuda_last_error());
+  }
+#endif
 
 #ifdef DEBUG_P_BLOCK
   DEBUG_P_JOB = 0;
@@ -629,6 +670,7 @@ uint32_t VC2Encoder::getExtraLengthForFragmentHeaders(uint32_t data_length) {
 bool VC2Encoder::encodeData(char **idata, int *istride, char **_odata, int length, uint32_t *prev_parse_offset) {
   int coded_length = length;
   char *odata = *_odata;
+  char *picture_odata = odata;
 
   ++mJobsInFlight;
 
@@ -690,6 +732,14 @@ bool VC2Encoder::encodeData(char **idata, int *istride, char **_odata, int lengt
 
   if (mCoefSize == 2) {
     INIT_MT;
+    const bool cuda_quantiser_candidate = USE_CUDA &&
+      mParams.input_format == VC2ENCODER_INPUT_10P2 &&
+      mParams.transform_params.wavelet_index == VC2ENCODER_WFT_HAAR_NO_SHIFT &&
+      mParams.transform_params.wavelet_depth == 3 &&
+      mParams.transform_params.slice_width == 32 &&
+      mParams.transform_params.slice_height == 8 &&
+      mParams.speed == VC2ENCODER_SPEED_FASTEST && !mParams.fragment_size;
+    mCudaQuantisersReady = false;
     CodedSlice<int16_t> *slices = mSlices16->slices;
     int n_slices = (mSlicesPerPicture + NFACTOR - 1)/NFACTOR;
     int k = 0;
@@ -717,8 +767,9 @@ bool VC2Encoder::encodeData(char **idata, int *istride, char **_odata, int lengt
       mEncoderData[k].final_offset = 0;
       mEncoderData[k].sx = sx;
       mEncoderData[k].sy = sy;
-      MT_JOB(bind(&VC2Encoder::EncodePartial<int16_t>, this,
-                  &mEncoderData[k]));
+      if (!cuda_quantiser_candidate)
+        MT_JOB(bind(&VC2Encoder::EncodePartial<int16_t>, this,
+                    &mEncoderData[k]));
       sx += n_slices;
       if (sx >= mSlicesPerLine) {
         sy += (sx/mSlicesPerLine);
@@ -748,9 +799,45 @@ bool VC2Encoder::encodeData(char **idata, int *istride, char **_odata, int lengt
       mEncoderData[k].final_offset = 0;
       mEncoderData[k].sx = sx;
       mEncoderData[k].sy = sy;
-      MT_JOB(bind(&VC2Encoder::EncodePartial<int16_t>, this,
-                  &mEncoderData[k]));
+      if (!cuda_quantiser_candidate)
+        MT_JOB(bind(&VC2Encoder::EncodePartial<int16_t>, this,
+                    &mEncoderData[k]));
     }
+#ifdef VC2_ENABLE_CUDA
+    if (cuda_quantiser_candidate) {
+      std::vector<int> max_sizes(mSlicesPerPicture);
+      std::vector<int> output_offsets(mSlicesPerPicture);
+      int slice_index = 0;
+      int output_offset = 0;
+      for (int part = 0; part <= k; ++part) {
+        int part_remaining = mEncoderData[part].olength;
+        for (int i = 0; i < mEncoderData[part].n_slices; ++i) {
+          max_sizes[slice_index] =
+            ((part_remaining / mSliceSizeScalar) /
+             (mEncoderData[part].n_slices - i)) * mSliceSizeScalar;
+          part_remaining -= max_sizes[slice_index];
+          output_offsets[slice_index] = output_offset;
+          output_offset += max_sizes[slice_index];
+          ++slice_index;
+        }
+      }
+      JobData<int16_t> *cuda_job = dynamic_cast<JobData<int16_t> *>(mJobData[0]);
+      const int output_stride[3] = { cuda_job->video_data[0]->stride,
+                                     cuda_job->video_data[1]->stride,
+                                     cuda_job->video_data[2]->stride };
+      const bool cuda_direct_encoded = vc2_cuda_encode_32x8_i16(
+        max_sizes.data(), output_offsets.data(), mSlicesPerPicture,
+        mSlicesPerLine, mSliceSizeScalar,
+        output_stride, mQuantisationMatrices->packed_m(),
+        mQuantisationMatrices->packed_sh(),
+        reinterpret_cast<uint8_t *>(picture_odata), output_offset);
+      if (!cuda_direct_encoded) {
+        writelog(LOG_ERROR, "CUDA direct encoder failed after retaining coefficients on the GPU: %s",
+                 vc2_cuda_last_error());
+        throw VC2ENCODER_ENCODE_FAILED;
+      }
+    }
+#endif
     if (EXEC_MT)
       throw VC2ENCODER_ENCODE_FAILED;
   } else if (mCoefSize == 4) {
@@ -997,6 +1084,42 @@ template <class T> void VC2Encoder::Transform(JobBase *_job) {
   void *odata[3] = { (void *)job->video_data[0]->data,
                      (void *)job->video_data[1]->data,
                      (void *)job->video_data[2]->data };
+#ifdef VC2_ENABLE_CUDA
+  if (USE_CUDA && mCoefSize == 2 &&
+      mParams.input_format == VC2ENCODER_INPUT_10P2 &&
+      mParams.transform_params.wavelet_index == VC2ENCODER_WFT_HAAR_NO_SHIFT) {
+    vc2hq_stage_profile::Scope profile(vc2hq_stage_profile::INPUT_HORIZONTAL);
+    const uint16_t *cuda_input[3] = {
+      reinterpret_cast<const uint16_t *>(idata[0]),
+      reinterpret_cast<const uint16_t *>(idata[1]),
+      reinterpret_cast<const uint16_t *>(idata[2]) };
+    int16_t *cuda_output[3] = {
+      reinterpret_cast<int16_t *>(odata[0]),
+      reinterpret_cast<int16_t *>(odata[1]),
+      reinterpret_cast<int16_t *>(odata[2]) };
+    const int output_stride[3] = { job->video_data[0]->stride,
+                                   job->video_data[1]->stride,
+                                   job->video_data[2]->stride };
+    const int output_width[3] = { job->video_data[0]->width,
+                                  job->video_data[1]->width,
+                                  job->video_data[2]->width };
+    const int output_height[3] = { job->video_data[0]->height,
+                                   job->video_data[1]->height,
+                                   job->video_data[2]->height };
+    const bool cuda_direct_candidate =
+      mParams.transform_params.wavelet_depth == 3 &&
+      mParams.transform_params.slice_width == 32 &&
+      mParams.transform_params.slice_height == 8 &&
+      mParams.speed == VC2ENCODER_SPEED_FASTEST && !mParams.fragment_size;
+    if (vc2_cuda_haar0_transform_10p2_i16_3plane(
+          cuda_input, istride, cuda_output, output_stride,
+          job->iwidth, job->iheight, output_width, output_height, mDepth,
+          !cuda_direct_candidate))
+      return;
+    writelog(LOG_WARN, "CUDA transform failed; falling back to CPU: %s",
+             vc2_cuda_last_error());
+  }
+#endif
   for (int c = 0; c < 3; c++) {
     int skip = 1;
 #ifdef DEBUG_P_BLOCK
@@ -1122,7 +1245,11 @@ template <class T> void VC2Encoder::Transform(JobBase *_job) {
 }
 
 template<> void VC2Encoder::Encode(CodedSlice<int16_t> *slices, int n_slices, int olength) {
-  slice_encoder_func16(slices, n_slices, mQuantisationMatrices, olength, mParams.transform_params.wavelet_index, mSliceSizeScalar, mParams.transform_params.slice_width, mParams.transform_params.slice_height, mDepth);
+  if (mCudaQuantisersReady)
+    encode_slices_preselected_32x8_i16(slices, n_slices, mQuantisationMatrices,
+                                       olength, mSliceSizeScalar);
+  else
+    slice_encoder_func16(slices, n_slices, mQuantisationMatrices, olength, mParams.transform_params.wavelet_index, mSliceSizeScalar, mParams.transform_params.slice_width, mParams.transform_params.slice_height, mDepth);
 }
 
 template<> void VC2Encoder::Encode(CodedSlice<int32_t> *slices, int n_slices, int olength) {

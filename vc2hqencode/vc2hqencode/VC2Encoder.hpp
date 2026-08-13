@@ -69,6 +69,7 @@ public:
 
     mSliceSizeScalar = 2;
     mInterlaced = false;
+    mCudaQuantisersReady = false;
   }
   virtual ~VC2Encoder() {
     if (mPool) {
@@ -177,6 +178,7 @@ protected:
   int mCoefSize;
 
   partial_encode_data *mEncoderData;
+  bool mCudaQuantisersReady;
 };
 
 #endif /* __VC2ENCODER_HPP__ */
