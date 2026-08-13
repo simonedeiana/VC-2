@@ -5,7 +5,14 @@
 /.vcpkg_installed/
 /.venv-validator/
 /build-msvc/
+/build-profile/
+/build-lto/
+/build-cuda/
 /artifacts/
+/out/
+
+# Visual Studio workspace state.
+/.vs/
 
 # Generated benchmark and codec output.
 /*.vc2
@@ -16,6 +23,10 @@
 /profiles/*.etl
 /profiles/*.csv
 /profiles/*.xml
+/profiles/*.vc2
+/profiles/*.raw
+/profiles/*.nsys-rep
+/profiles/*.sqlite
 
 # Common local caches.
 **/__pycache__/
