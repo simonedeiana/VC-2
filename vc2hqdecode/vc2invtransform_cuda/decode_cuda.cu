@@ -374,7 +374,7 @@ __device__ void haar_h_final(int16_t *plane, int stride, int base,
 // Kernel 2: inverse transform + output, one warp per slice. The transform is
 // slice-local so each warp reads/writes only its own region of the planes.
 // ---------------------------------------------------------------------------
-__global__ void vc2_decode_transform_kernel(
+__global__ void __launch_bounds__(128, 12) vc2_decode_transform_kernel(
     int16_t *__restrict__ plane_y, int stride_y,
     int16_t *__restrict__ plane_c, int stride_c,
     uint16_t *__restrict__ out_y, int ostride_y,
@@ -579,6 +579,21 @@ bool vc2_cuda_decode_picture(
       !reserve_buffer(reinterpret_cast<void **>(&device_table), &table_capacity, table_bytes))
     return false;
 
+  // Stage the frame in a persistent pinned buffer so the upload is not
+  // staged through pageable memory on every picture.
+  if (pinned_payload_capacity < frame_bytes) {
+    if (pinned_payload) {
+      cudaFreeHost(pinned_payload);
+      pinned_payload = nullptr;
+      pinned_payload_capacity = 0;
+    }
+    if (!cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&pinned_payload), frame_bytes),
+                 "frame staging allocation"))
+      return false;
+    pinned_payload_capacity = frame_bytes;
+  }
+  memcpy(pinned_payload, frame, frame_bytes);
+
   // Output buffers sized to the host strides so the download is contiguous;
   // grow here because the actual output stride is only known per frame.
   const size_t out_y_bytes = static_cast<size_t>(ostride[0]) * g_out_height[0] * sizeof(uint16_t);
@@ -587,7 +602,7 @@ bool vc2_cuda_decode_picture(
       !reserve_buffer(reinterpret_cast<void **>(&device_out[1]), &out_capacity[1], 2 * out_c_bytes))
     return false;
 
-  if (!cuda_ok(cudaMemcpyAsync(device_payload, frame, frame_bytes,
+  if (!cuda_ok(cudaMemcpyAsync(device_payload, pinned_payload, frame_bytes,
                                cudaMemcpyHostToDevice, decode_stream), "frame upload") ||
       !cuda_ok(cudaMemcpyAsync(device_table, table, table_bytes,
                                cudaMemcpyHostToDevice, decode_stream), "slice table upload"))
