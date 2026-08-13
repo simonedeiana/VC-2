@@ -338,6 +338,10 @@ public:
       return &mSh[(qi-mQmin)*(mMatrixYLen + 2*mMatrixCLen) + mMatrixYLen + mMatrixCLen];
   }
 
+  const uint16_t *packed_m() const { return mM; }
+  const uint8_t *packed_sh() const { return mSh; }
+  int packed_length() const { return (mQmax-mQmin)*(mMatrixYLen + 2*mMatrixCLen); }
+
 protected:
   uint16_t *mQF;
   uint16_t *mM;

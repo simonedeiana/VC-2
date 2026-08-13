@@ -592,7 +592,7 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
 
 
   QuantisationWeightingMatrix matrix = preset_quantisation_matrices[wavelet_index][depth];
-  uint32_t L[3][MAX_DWT_DEPTH][4], A[3][MAX_DWT_DEPTH][4];
+  uint32_t L[3][MAX_DWT_DEPTH][4];
   int qi_bl = 0;
 
   memset((char *)L, 0, sizeof(L));
@@ -617,7 +617,6 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
           L[c][l][2] |= abs(slice->idata[c][y*slice->istride[c] + x]);
         }
       }
-      A[c][l][2] /= (((c==0)?w:w/2)/skip)*(h/skip);
 
       for (int y = skip/2; y < h; y += skip) {
         for (int x = skip/2; x < ((c==0)?w:w/2); x += skip) {
@@ -651,7 +650,17 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
       qi_cur += inc;
       //      inc *= 2;
       qi_ceil = qi_cur;
-      coded_length_for_slice<w,h,depth, T>(slice, qi_cur, matrices, slice_size_scalar, lengths);
+      if (QUAL == QUANTISER_SELECTION_EIGHTHSEARCH) {
+        slice->qindex = min(max(qi_cur, MIN_QI), MAX_QI);
+        encode_slice_component<w,h,depth,T>(slice, 0, matrices);
+        encode_slice_component<w/2,h,depth,T>(slice, 1, matrices);
+        encode_slice_component<w/2,h,depth,T>(slice, 2, matrices);
+        lengths[0] = (slice->length[0] + slice_size_scalar - 1)/slice_size_scalar*slice_size_scalar;
+        lengths[1] = (slice->length[1] + slice_size_scalar - 1)/slice_size_scalar*slice_size_scalar;
+        lengths[2] = (slice->length[2] + slice_size_scalar - 1)/slice_size_scalar*slice_size_scalar;
+      } else {
+        coded_length_for_slice<w,h,depth, T>(slice, qi_cur, matrices, slice_size_scalar, lengths);
+      }
       length = 4 + lengths[0] + lengths[1] + lengths[2];
       count++;
     } while(qi_cur < MAX_QI &&

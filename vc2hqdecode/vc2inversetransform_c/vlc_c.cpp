@@ -186,9 +186,6 @@ template<class T> void decode_slices_c(QuantisationMatrix *matrices,
                                        int slice_height,
                                        int depth,
                                        DequantiseFunction *dequant) {
-  for (int i = 0; i < 16384; i += 64)
-    _mm_prefetch(((char *)VLCLUT) + i, _MM_HINT_T0);
-
   for (int Y = 0; Y < n_slices_y; Y++) {
     for (int X = 0; X < n_slices_x; X++) {
       const int n = Y*n_slices_x + X;

@@ -80,6 +80,29 @@ template<class T> inline void zero_slice(CodedSlice<T> *slice) {
   slice->samples[2] = 0;
 }
 
+void encode_slices_preselected_32x8_i16(CodedSlice<int16_t> *slices, int n,
+                                        QuantisationMatrices *matrices,
+                                        int encode_length, int slice_size_scalar) {
+  int remaining_length = encode_length;
+  for (int i = 0; i < n; ++i) {
+    const int coded_size = ((remaining_length / slice_size_scalar) / (n - i)) *
+                           slice_size_scalar;
+    encode_slice_component<32,8,3,int16_t>(&slices[i], 0, matrices);
+    encode_slice_component<16,8,3,int16_t>(&slices[i], 1, matrices);
+    encode_slice_component<16,8,3,int16_t>(&slices[i], 2, matrices);
+    const int length0 = (slices[i].length[0] + slice_size_scalar - 1) / slice_size_scalar;
+    const int length1 = (slices[i].length[1] + slice_size_scalar - 1) / slice_size_scalar;
+    const int length2 = (slices[i].length[2] + slice_size_scalar - 1) / slice_size_scalar;
+    int coded_length = 4 + (length0 + length1 + length2) * slice_size_scalar;
+    if (coded_length > coded_size || length0 > 255 || length1 > 255 || length2 > 255) {
+      zero_slice<int16_t>(&slices[i]);
+      coded_length = 4;
+    }
+    remaining_length -= coded_size;
+    slices[i].padding = coded_size - coded_length;
+  }
+}
+
 template<int w, int h, int d, int QUAL, int passes, class T> void encode_slices(CodedSlice<T> *slices, int n, QuantisationMatrices *matrices, int encode_length, int wavelet_index, int slice_size_scalar, int, int, int) {
 #ifdef DEBUG
   uint32_t samples[64];
@@ -98,9 +121,11 @@ template<int w, int h, int d, int QUAL, int passes, class T> void encode_slices(
     int coded_size = ( ( remaining_length / slice_size_scalar )/( n - i ) ) * slice_size_scalar;
 
     choose_quantiser<w,h,d,QUAL,T>(&slices[i], coded_size, wavelet_index, slice_size_scalar, matrices);
-    encode_slice_component<w,h,d,T>(&slices[i], 0, matrices);
-    encode_slice_component<w/2,h,d,T>(&slices[i], 1, matrices);
-    encode_slice_component<w/2,h,d,T>(&slices[i], 2, matrices);
+    if (QUAL != QUANTISER_SELECTION_EIGHTHSEARCH) {
+      encode_slice_component<w,h,d,T>(&slices[i], 0, matrices);
+      encode_slice_component<w/2,h,d,T>(&slices[i], 1, matrices);
+      encode_slice_component<w/2,h,d,T>(&slices[i], 2, matrices);
+    }
     int length[3];
     length[0] = (slices[i].length[0] + slice_size_scalar - 1)/slice_size_scalar;
     length[1] = (slices[i].length[1] + slice_size_scalar - 1)/slice_size_scalar;
@@ -140,9 +165,11 @@ template<int w, int h, int d, int QUAL, int passes, class T> void encode_slices(
       int coded_size = old_cl + ((remaining_length/slice_size_scalar)/(n_tgt_slices[pass - 1] - i)*slice_size_scalar);
 
       choose_quantiser<w,h,d,QUAL,T>(tgt_slices[pass - 1][i], coded_size, wavelet_index, slice_size_scalar, matrices);
-      encode_slice_component<w,h,d,T>(tgt_slices[pass - 1][i], 0, matrices);
-      encode_slice_component<w/2,h,d,T>(tgt_slices[pass - 1][i], 1, matrices);
-      encode_slice_component<w/2,h,d,T>(tgt_slices[pass - 1][i], 2, matrices);
+      if (QUAL != QUANTISER_SELECTION_EIGHTHSEARCH) {
+        encode_slice_component<w,h,d,T>(tgt_slices[pass - 1][i], 0, matrices);
+        encode_slice_component<w/2,h,d,T>(tgt_slices[pass - 1][i], 1, matrices);
+        encode_slice_component<w/2,h,d,T>(tgt_slices[pass - 1][i], 2, matrices);
+      }
       length[0] = (tgt_slices[pass - 1][i]->length[0] + slice_size_scalar - 1)/slice_size_scalar;
       length[1] = (tgt_slices[pass - 1][i]->length[1] + slice_size_scalar - 1)/slice_size_scalar;
       length[2] = (tgt_slices[pass - 1][i]->length[2] + slice_size_scalar - 1)/slice_size_scalar;

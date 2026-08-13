@@ -42,6 +42,10 @@ typedef void (*SliceEncoderFunc32)(CodedSlice<int32_t> *, int, QuantisationMatri
 SliceEncoderFunc16 get_slice_encoder16(int w, int h, int d, int QUAL, int passes);
 SliceEncoderFunc32 get_slice_encoder32(int w, int h, int d, int QUAL, int passes);
 
+void encode_slices_preselected_32x8_i16(CodedSlice<int16_t> *slices, int n,
+                                        QuantisationMatrices *matrices,
+                                        int encode_length, int slice_size_scalar);
+
 uint8_t encode_uint(uint16_t x, uint32_t *output, uint8_t *lengthout);
 
 #endif /* __ENCODE_HPP__ */

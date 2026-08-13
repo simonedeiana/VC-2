@@ -794,17 +794,20 @@ void VC2Decoder::setParams(VC2DecoderParamsInternal &params) {
         int tgt_y = (y*spj_y)*slice_height;
         int output_w = MIN(s_x*slice_width - PADX_POST, mWidth - tgt_x);
         int output_h = MIN(s_y*slice_height - PADY_POST, mHeight - tgt_y);
-        mJobs[y*mJobsX + x] = new JobData(y*mJobsX + x,
+        const JobConfig job_config = {
+          y*mJobsX + x,
+          sample_size,
           (pad_xa + s_x + pad_xz)*slice_width,
           (pad_ya + s_y + pad_yz)*slice_height,
-          mVideoFormat.frame_height,
+          static_cast<int>(mVideoFormat.frame_height),
           (pad_xa + s_x + pad_xz), (pad_ya + s_y + pad_yz),
           PADX_PRE,
           PADY_PRE,
           output_w, output_h,
           tgt_x, tgt_y,
-          x*spj_x - pad_xa, y*spj_y - pad_ya,
-          sample_size);
+          x*spj_x - pad_xa, y*spj_y - pad_ya
+        };
+        mJobs[y*mJobsX + x] = new JobData(job_config);
 
 #ifdef DEBUG_P_BLOCK
         if (DEBUG_P_BLOCK_Y >= spj_y*y && DEBUG_P_BLOCK_Y < spj_y*y + s_y &&

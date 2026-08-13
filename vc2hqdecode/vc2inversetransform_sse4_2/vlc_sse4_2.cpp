@@ -62,24 +62,25 @@ inline int decode_sse4_2(uint8_t *idata, int ilength, int32_t *odata, int olengt
     next = &VLCLUT[0xFF];
 
   while (icounter < ilength && ocounter < olength) {
+    const LUTEntry &entry = *next;
     __m128i E = _mm_load_si128((__m128i *)next);
-    next  = &VLCLUT[(((int)_mm_extract_epi8(E, 0)) << 8) + idata[icounter++]];
+    next  = &VLCLUT[(((int)entry.state) << 8) + idata[icounter++]];
 
-    V <<= _mm_extract_epi8(E, 1); // preshift
-    V +=  _mm_extract_epi8(E, 8); // val0
+    V <<= entry.preshift;
+    V += entry.val0;
 
     __m128i A = _mm_unpackhi_epi8(ZERO, E);
     __m128i B = _mm_srai_epi32(_mm_unpacklo_epi16(ZERO, A), 24);
     __m128i C = _mm_srai_epi32(_mm_unpackhi_epi16(ZERO, A), 24);
 
-    B = _mm_insert_epi32(B, (V - 1)*((int8_t)_mm_extract_epi8(E, 2)), 0);
+    B = _mm_insert_epi32(B, (V - 1)*entry.sgn, 0);
 
     _mm_storeu_si128((__m128i *)&odata[ocounter],     B);
     _mm_storeu_si128((__m128i *)&odata[ocounter + 4], C);
 
-    if (_mm_extract_epi8(E, 3))         // term
-      V = _mm_extract_epi8(E, 4);       // V
-    ocounter += _mm_extract_epi8(E, 5); // N
+    if (entry.term)
+      V = entry.V;
+    ocounter += entry.N;
   }
 
   if (icounter < ilength) {
@@ -87,24 +88,25 @@ inline int decode_sse4_2(uint8_t *idata, int ilength, int32_t *odata, int olengt
   }
 
   if (ocounter < olength) {
+    const LUTEntry &entry = *next;
     __m128i E = _mm_load_si128((__m128i *)next);
-    state = (int)_mm_extract_epi8(E, 0);
+    state = entry.state;
 
-    V <<= _mm_extract_epi8(E, 1); // preshift
-    V +=  _mm_extract_epi8(E, 8); // val0
+    V <<= entry.preshift;
+    V += entry.val0;
 
     __m128i A = _mm_unpackhi_epi8(ZERO, E);
     __m128i B = _mm_srai_epi32(_mm_unpacklo_epi16(ZERO, A), 24);
     __m128i C = _mm_srai_epi32(_mm_unpackhi_epi16(ZERO, A), 24);
 
-    B = _mm_insert_epi32(B, (V - 1)*((int8_t)_mm_extract_epi8(E, 2)), 0);
+    B = _mm_insert_epi32(B, (V - 1)*entry.sgn, 0);
 
     _mm_storeu_si128((__m128i *)&odata[ocounter],     B);
     _mm_storeu_si128((__m128i *)&odata[ocounter + 4], C);
 
-    if (_mm_extract_epi8(E, 3))         // term
-      V = _mm_extract_epi8(E, 4);       // V
-    ocounter += _mm_extract_epi8(E, 5); // N
+    if (entry.term)
+      V = entry.V;
+    ocounter += entry.N;
   }
 
   if (ocounter < olength) {
@@ -115,7 +117,7 @@ inline int decode_sse4_2(uint8_t *idata, int ilength, int32_t *odata, int olengt
       V += 1;
     case STATE_FOLLOW:
     case STATE_SIGN:
-      _mm_insert_epi32(TMP, -(V - 1), 0);
+      TMP = _mm_insert_epi32(TMP, -(V - 1), 0);
     }
     _mm_storeu_si128((__m128i *)&odata[ocounter], TMP);
     ocounter = (ocounter + 4)&0xFFFFFFFC;
@@ -140,9 +142,6 @@ template<class T> void decode_slices_sse4_2(QuantisationMatrix *matrices,
                                        int slice_height,
                                        int depth,
                                        DequantiseFunction *dequant) {
-  for (int i = 0; i < 16384; i += 64)
-    _mm_prefetch(((char *)VLCLUT) + i, _MM_HINT_T0);
-
   for (int Y = 0; Y < n_slices_y; Y++) {
     for (int X = 0; X < n_slices_x; X++) {
       const int n = Y*n_slices_x + X;

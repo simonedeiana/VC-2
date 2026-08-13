@@ -95,15 +95,41 @@ struct VideoPlane {
   int width;
 };
 
+struct JobConfig {
+  int number;
+  int sample_size;
+  int width;
+  int height;
+  int fullheight;
+  int slices_x;
+  int slices_y;
+  int output_x;
+  int output_y;
+  int output_width;
+  int output_height;
+  int target_x;
+  int target_y;
+  int slice_start_x;
+  int slice_start_y;
+};
+
 struct JobData {
-  JobData (int n,
-           int _width, int _height, int _fullheight,
-           int _slices_x, int _slices_y,
-           int off_x, int off_y,
-           int outw,  int outh,
-           int tgt_x, int tgt_y,
-           int _slice_start_x, int _slice_start_y,
-           int sample_size) {
+  explicit JobData (const JobConfig &config) {
+    const int n = config.number;
+    const int sample_size = config.sample_size;
+    const int _width = config.width;
+    const int _height = config.height;
+    const int _fullheight = config.fullheight;
+    const int _slices_x = config.slices_x;
+    const int _slices_y = config.slices_y;
+    const int off_x = config.output_x;
+    const int off_y = config.output_y;
+    const int outw = config.output_width;
+    const int outh = config.output_height;
+    const int tgt_x = config.target_x;
+    const int tgt_y = config.target_y;
+    const int _slice_start_x = config.slice_start_x;
+    const int _slice_start_y = config.slice_start_y;
     number = n;
     width[0] = _width;
     width[1] = _width/2;
