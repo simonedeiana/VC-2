@@ -41,6 +41,25 @@ InplaceTransform get_invhtransform_sse4_2(int wavelet_index, int level, int dept
     default:
       break;
     }
+  } else if (sample_size == 2) {
+    switch(wavelet_index) {
+    case VC2DECODER_WFT_HAAR_NO_SHIFT:
+      switch (depth - level - 1) {
+      case 2: return Haar_invtransform_H_inplace_sse4_2_int16_t<4, 0>;
+      case 1: return Haar_invtransform_H_inplace_sse4_2_int16_t<2, 0>;
+      case 0: return Haar_invtransform_H_inplace_1_sse4_2_int16_t<0>;
+      }
+      break;
+    case VC2DECODER_WFT_HAAR_SINGLE_SHIFT:
+      switch (depth - level - 1) {
+      case 2: return Haar_invtransform_H_inplace_sse4_2_int16_t<4, 1>;
+      case 1: return Haar_invtransform_H_inplace_sse4_2_int16_t<2, 1>;
+      case 0: return Haar_invtransform_H_inplace_1_sse4_2_int16_t<1>;
+      }
+      break;
+    default:
+      break;
+    }
   }
 
   return get_invhtransform_c(wavelet_index, level, depth, sample_size);
@@ -71,6 +90,15 @@ InplaceTransform get_invvtransform_sse4_2(int wavelet_index, int level, int dept
         return LeGall_5_3_invtransform_V_inplace_sse4_2_int16_t<2>;
       else if (depth - level - 1 == 0)
         return LeGall_5_3_invtransform_V_inplace_sse4_2_int16_t<1>;
+      break;
+    case VC2DECODER_WFT_HAAR_NO_SHIFT:
+    case VC2DECODER_WFT_HAAR_SINGLE_SHIFT:
+      switch (depth - level - 1) {
+      case 3: return Haar_invtransform_V_inplace_sse4_2_int16_t<8>;
+      case 2: return Haar_invtransform_V_inplace_sse4_2_int16_t<4>;
+      case 1: return Haar_invtransform_V_inplace_sse4_2_int16_t<2>;
+      case 0: return Haar_invtransform_V_inplace_sse4_2_int16_t<1>;
+      }
       break;
     default:
       break;

@@ -115,3 +115,170 @@ changes.
   (`4f98b0449d27c18a8cbd5c45e66e8091a270e9e0fd7855cf54d53686b2bfbf9b`).
 - Single-thread decoder pixels matched the corrected baseline SHA-256 exactly
   (`5be3ee7ae2f03cb5739f8f3342c3cdf41dd7e2f060eb04a8f9c3044b355c07e7`).
+
+---
+
+# Round 2: single-thread focus — profiling tooling + decoder SIMD
+
+Date: 2026-08-13
+
+## Workload and methodology
+
+- Same CPU/compiler as round 1, but single-thread focus throughout
+  (`--threads=1`).
+- Benchmark harness `bench/bench.ps1` pins the process to one logical CPU
+  (affinity `0x100`) at AboveNormal priority and reports medians of 7-9
+  interleaved runs, which cut run-to-run variance from ~25% to ~2%.
+- Reference baseline = committed `9b374b5` built in an isolated worktree.
+
+## Results (single thread, medians of interleaved runs)
+
+| Codec | Baseline median | Optimized median | Improvement |
+|---|---:|---:|---:|
+| Encoder | 34.98 fps | 34.78 fps | ~0% (neutral) |
+| Decoder | 65.44 fps | 76.72 fps | **+17.2%** |
+
+Decoder latency per frame fell from 15.28 ms to 13.03 ms. The encoder changes
+are retained only where they are byte-identical and non-harmful; two
+experiments regressed and were reverted (see below).
+
+## Profiling tooling
+
+- Fine-grained `VC2HQ_PROFILE` stage scopes: the encoder `quantise+entropy`
+  stage now splits into `quantiser-search` vs `quantise+encode`, and the
+  decoder `entropy+dequantise` splits into `vlc-decode` vs `dequantise`
+  (scopes moved inside `encode_slices` / `decode_slices_*`).
+- `stage_profile::enabled()` now reads a plain namespace-scope flag instead of
+  a function-local static. MSVC's thread-safe static-init guard
+  (`_Init_thread_header`) was showing up as ~2% of VTune samples on millions
+  of hot-path calls.
+- Intel VTune software sampling (`sampling-mode=sw`) works and produced
+  symbolised function hotspots. Hardware sampling is unavailable: the current
+  VTune cannot recognise the Xeon E5-1650 v4 (Broadwell) PMU.
+
+## Decoder changes (retained)
+
+The SSE4.2 inverse-transform dispatcher had **no Haar kernels for 16-bit
+samples** (10-bit streams), so the benchmark's inverse-vertical and
+inverse-horizontal stages ran fully scalar. Added:
+
+- `Haar_invtransform_V_inplace_sse4_2_int16_t<skip>` for skip 1/2/4/8:
+  elementwise 8-wide processing with lane blending to preserve the untouched
+  horizontal subband columns (`0x55`/`0x11`/`0x01` masks).
+- `Haar_invtransform_H_inplace_1_sse4_2_int16_t<shift>` (skip 1): even/odd
+  de-interleave, filter, interleave back.
+- `Haar_invtransform_H_inplace_sse4_2_int16_t<skip, shift>` for skip 2/4:
+  shuffle-extract the strided pairs, filter, spread back, lane-blend.
+  (skip 8 pairs span two 128-bit vectors, left on the C path.)
+- Dispatch entries in `invtransform_sse4_2.cpp` for both `HAAR_NO_SHIFT` and
+  `HAAR_SINGLE_SHIFT` at sample size 2.
+
+Stage shift (30-frame profile, `VC2HQ_PROFILE=1`):
+
+| Stage | Before | After |
+|---|---:|---:|
+| vlc-decode | 57.0% (314 ms) | 64.8% (299 ms) |
+| dequantise | 11.7% (65 ms) | 13.7% (63 ms) |
+| inverse-vertical | 18.3% (101 ms) | 6.9% (32 ms) |
+| inverse-horizontal | 4.7% (26 ms) | 4.9% (22 ms) |
+| final-horizontal+output | 8.3% (46 ms) | 9.8% (45 ms) |
+
+The inverse-vertical stage is ~3x faster; VLC is now the sole dominant stage.
+
+## Encoder changes (retained)
+
+- Merged `CWLUT` + `WLLUT` into one 32-bit table (`CLWLUT` in `lut.hpp`);
+  `encode_sample` does one LUT load instead of two. Byte-identical, ~neutral.
+
+## Rejected experiments
+
+- **EIGHTHSEARCH length-only trials** (est. length during search, one final
+  encode): regressed ~30% because the common case is a single trial, so the
+  old "emit during the final trial and reuse" scheme already does exactly one
+  full encode; the new scheme added a second pass.
+- **Batched byte-flush bit-packer** in `serialise_slices`: regressed ~7%.
+  The data-dependent `if (bits >= 8)` branches cost more than the 4-byte
+  per-codeword stores save (the store buffer absorbs the overwrites).
+- **Samples-scan** (separate last-nonzero pass to break the serial max-chain):
+  reverted — measurements were contradictory (stage profile ±3%, fps A/B
+  noisy); the added pass did not robustly pay for itself.
+
+## Verification (against `9b374b5` worktree build)
+
+- Encoder stream SHA-256 identical (`4e45ed1c...`) across haar0, haar1,
+  LeGall 5/3, and DD 9-7.
+- Decoder pixels SHA-256 identical (`56e5c487...`) for Haar and LeGall
+  streams.
+- Six of six native CTest targets passed; conformance validator clean.
+
+---
+
+# Round 3 — interleaved multi-stream VLC decode
+
+Date: 2026-08-13
+
+## Result
+
+| Codec | Baseline median | Optimized median | Improvement |
+|---|---:|---:|---:|
+| Decoder (single-thread, 120f) | 66.04 fps | 73.45 fps | **+11.2%** |
+
+Baseline = `bench/baseline/vc2decode.exe` (the round-2 state, saved before
+the VLC changes), pinned to one CPU, AboveNormal priority, nine alternating
+120-frame runs, medians. Byte-identical output (SHA-256 `56e5c487...`).
+
+## What was done
+
+The VLC stage is ~66% of decode time and is **chain-latency bound**: a
+discriminator that stripped the SIMD payload from the decode loop showed the
+serial LUT-latency chain + scalar control is ~76% of the loop, the SIMD
+payload ~24%. The fix hides the serial chain by decoding independent streams
+in one interleaved loop.
+
+- `vlc_step_ex` / `vlc_tail_ex` in `vlc_sse4_2.cpp`: one decode step with the
+  per-stream state passed by reference as scalars (`ic`, `oc`, `V`, `next`) so
+  the compiler keeps it in registers.
+- `decode_sse4_2_x3`: decodes a slice's three components (Y/C1/C2) together —
+  a 3-way interleaved loop (then 2-way, then 1-way drains, then tails).
+- The `decode_slices_sse4_2<T>` driver pairs adjacent slices and keeps each
+  decode→dequant pair adjacent so the three scratch buffers are never reused
+  before their dequant (fixes an earlier clobbering bug).
+- Stage profile (30-frame): vlc-decode 355 ms → ~320 ms at the same total
+  frame count, now 67% of a faster total.
+
+## Rejected experiments
+
+- **Struct-based interleaved state** (`VLCState`): only +3.3%. The 8-field
+  struct spilled to the stack; passing state by reference as scalars kept it
+  in GPRs and delivered the +11.2% above.
+- **AVX2 dequantise** (8-wide `abs/mul/add/shift/sign` for the 32x8x3 and
+  16x8x3 paths): **-5.2% regression** in a same-session interleaved A/B
+  (67.95 vs 71.68 fps), despite the dequant stage itself profiling faster
+  (57.5 vs 72.5 ms). Likely AVX downclocking on this Broadwell-EP Xeon hurting
+  the latency-bound VLC loop. Reverted.
+- **Single-job decode grid** (`n_jobs = 1` for `--threads=1`): +4.6% in
+  same-session A/B, but it changed decoded pixels for the
+  deslauriers-debuc-9-7 wavelet (~9 kbytes near the 4-job grid boundary).
+  The 1-job path is only compiled with `DEBUG_ONE_JOB` (the `debug.hpp`
+  include sits inside `#ifdef DEBUG`, so it never reaches Release builds);
+  it could not be validated byte-exact, so it was reverted.
+- **Matched-length stream grouping** (decode three adjacent slices' same
+  component together — `x3(Y_a,Y_b,Y_c)`, `x3(C1_a,C1_b,C1_c)`, ...): the
+  literature-driven idea that grouping same-length streams maximises the
+  interleaved window. The per-slice `x3(Y,C1,C2)` interleaves Y (256 coeffs)
+  with the shorter chroma (128 each), so its 3-way loop covers only the first
+  half and the Y tail decodes solo. Grouping by component removes that drain,
+  but it scatters the input reads: the bitstream is slice-major, so three
+  slices' Y streams are a full slice apart and defeat the sequential
+  prefetcher. **-3.5% regression** in a same-session A/B (63.8 vs 61.5 fps).
+  Reverted; the per-slice grouping keeps the contiguous Y/C1/C2 input, which
+  wins over the drain elimination. (Required sizing all scratch buffers to
+  the largest component; also reverted.)
+
+## Verification
+
+- Decoder pixels SHA-256 identical (`56e5c487...`) for haar0, haar1, LeGall,
+  and deslauriers-debuc-9-7 streams vs `bench/baseline`.
+- Six of six native CTest targets passed; conformance validator clean.
+- Encoder untouched (still `4e45ed1c...` at the same config).
+

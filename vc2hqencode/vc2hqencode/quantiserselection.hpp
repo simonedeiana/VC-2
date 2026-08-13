@@ -651,6 +651,9 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
       //      inc *= 2;
       qi_ceil = qi_cur;
       if (QUAL == QUANTISER_SELECTION_EIGHTHSEARCH) {
+        // EIGHTHSEARCH emits codewords during its final size trial and the
+        // encoder reuses them (encode_slices skips the re-encode). This keeps the
+        // common single-trial case down to exactly one full quantise+VLC pass.
         slice->qindex = min(max(qi_cur, MIN_QI), MAX_QI);
         encode_slice_component<w,h,depth,T>(slice, 0, matrices);
         encode_slice_component<w/2,h,depth,T>(slice, 1, matrices);

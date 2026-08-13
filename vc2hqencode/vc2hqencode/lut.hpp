@@ -125,4 +125,16 @@ static const uint16_t WLLUT[] = {
         16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 18
     };
 
+/* Merged (codeword, length) table: high 16 bits = CWLUT[i], low 16 bits = WLLUT[i].
+   A single 32-bit load replaces the two dependent LUT loads in encode_sample.
+   WLLUT values (0..18) always fit in the low byte. */
+struct CLWTable {
+  uint32_t v[256];
+  CLWTable() {
+    for (int i = 0; i < 256; i++)
+      v[i] = (((uint32_t)CWLUT[i]) << 16) | WLLUT[i];
+  }
+};
+static const CLWTable CLWLUT;
+
 #endif /* __LUT_HPP__ */
