@@ -60,11 +60,10 @@ uint8_t *device_payload = nullptr;
 size_t payload_capacity = 0;
 uint8_t *pinned_payload = nullptr;
 size_t pinned_payload_capacity = 0;
+uint16_t *pinned_out[3] = {};
+size_t pinned_out_capacity[3] = {};
 SliceEntry *device_table = nullptr;
 size_t table_capacity = 0;
-void *registered_out[3] = {};
-uint16_t *registered_out_ptr[3] = {};
-size_t registered_out_bytes[3] = {};
 LutEntry *device_lut = nullptr;
 int16_t *device_plane[2] = {};
 size_t plane_capacity[2] = {};
@@ -77,6 +76,8 @@ int32_t *device_qoffset = nullptr;
 size_t qfactor_bytes = 0;
 size_t qoffset_bytes = 0;
 cudaStream_t decode_stream = nullptr;
+cudaStream_t copy_stream[3] = {};
+cudaEvent_t transform_done = nullptr;
 bool lut_uploaded = false;
 bool tables_uploaded = false;
 std::mutex cuda_mutex;
@@ -509,6 +510,15 @@ bool vc2_cuda_decode_prepare(
       !cuda_ok(cudaStreamCreateWithFlags(&decode_stream, cudaStreamNonBlocking),
                "CUDA decoder stream creation"))
     return false;
+  for (int c = 0; c < 3; ++c)
+    if (!copy_stream[c] &&
+        !cuda_ok(cudaStreamCreateWithFlags(&copy_stream[c], cudaStreamNonBlocking),
+                 "CUDA decoder copy stream creation"))
+      return false;
+  if (!transform_done &&
+      !cuda_ok(cudaEventCreateWithFlags(&transform_done, cudaEventDisableTiming),
+               "CUDA decoder transform event creation"))
+    return false;
 
   // Decode LUT in read-only global memory (divergent per-lane lookups would
   // serialize on the constant cache).
@@ -601,6 +611,22 @@ bool vc2_cuda_decode_picture(
   if (!reserve_buffer(reinterpret_cast<void **>(&device_out[0]), &out_capacity[0], out_y_bytes) ||
       !reserve_buffer(reinterpret_cast<void **>(&device_out[1]), &out_capacity[1], 2 * out_c_bytes))
     return false;
+  // Downloads land in persistent pinned staging buffers (registered once) and
+  // are then copied to the caller's planes; the caller may change output
+  // pointers every picture, which would otherwise force a re-registration per
+  // picture (much more expensive than the copy itself).
+  const size_t plane_bytes[3] = {out_y_bytes, out_c_bytes, out_c_bytes};
+  for (int c = 0; c < 3; ++c)
+    if (pinned_out_capacity[c] < plane_bytes[c]) {
+      if (pinned_out[c])
+        cudaFreeHost(pinned_out[c]);
+      pinned_out[c] = nullptr;
+      pinned_out_capacity[c] = 0;
+      if (!cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&pinned_out[c]), plane_bytes[c]),
+                   "output staging allocation"))
+        return false;
+      pinned_out_capacity[c] = plane_bytes[c];
+    }
 
   if (!cuda_ok(cudaMemcpyAsync(device_payload, pinned_payload, frame_bytes,
                                cudaMemcpyHostToDevice, decode_stream), "frame upload") ||
@@ -651,19 +677,33 @@ bool vc2_cuda_decode_picture(
       frame_width, frame_height);
   if (!cuda_ok(cudaGetLastError(), "CUDA decoder kernel launch"))
     return false;
+  if (!cuda_ok(cudaEventRecord(transform_done, decode_stream),
+               "CUDA decoder transform event"))
+    return false;
 
-  // Download the three output planes into the pinned caller buffers.
+  // Download the three output planes into the persistent pinned staging
+  // buffers. Each plane copies on its own stream so the transfers overlap
+  // instead of serializing on the decode stream.
   const size_t y_bytes = static_cast<size_t>(ostride[0]) * g_out_height[0] * sizeof(uint16_t);
   const size_t c_bytes = static_cast<size_t>(ostride[1]) * g_out_height[1] * sizeof(uint16_t);
-  if (!cuda_ok(cudaMemcpyAsync(odata[0], device_out[0], y_bytes,
-                               cudaMemcpyDeviceToHost, decode_stream), "Y output download") ||
-      !cuda_ok(cudaMemcpyAsync(odata[1], device_out[1], c_bytes,
-                               cudaMemcpyDeviceToHost, decode_stream), "Cb output download") ||
-      !cuda_ok(cudaMemcpyAsync(odata[2], device_out[1] + plane_c_stride * g_out_height[1],
-                               c_bytes, cudaMemcpyDeviceToHost, decode_stream), "Cr output download"))
-    return false;
-
-  if (!cuda_ok(cudaStreamSynchronize(decode_stream), "CUDA decoder synchronization"))
-    return false;
+  const uint16_t *out_src[3] = {
+      device_out[0],
+      device_out[1],
+      device_out[1] + plane_c_stride * g_out_height[1]};
+  const size_t out_bytes[3] = {y_bytes, c_bytes, c_bytes};
+  for (int c = 0; c < 3; ++c) {
+    if (!cuda_ok(cudaStreamWaitEvent(copy_stream[c], transform_done, 0),
+                 "CUDA decoder copy dependency") ||
+        !cuda_ok(cudaMemcpyAsync(pinned_out[c], out_src[c], out_bytes[c],
+                                 cudaMemcpyDeviceToHost, copy_stream[c]),
+                 "CUDA decoder output download"))
+      return false;
+  }
+  for (int c = 0; c < 3; ++c)
+    if (!cuda_ok(cudaStreamSynchronize(copy_stream[c]), "CUDA decoder synchronization"))
+      return false;
+  // Copy the staged planes to the caller's buffers (pageable is fine here).
+  for (int c = 0; c < 3; ++c)
+    memcpy(odata[c], pinned_out[c], out_bytes[c]);
   return true;
 }
