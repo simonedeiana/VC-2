@@ -705,22 +705,24 @@ __global__ void select_quantisers_32x8(
   last_cb = warp_max(last_cb);
   last_cr = warp_max(last_cr);
 
-  int qi = max(qbase, static_cast<int>(qindices[slice]));
-  qi = max(0, qi - 8);
+  const int qi0 = max(qbase, static_cast<int>(qindices[slice]));
   int fits = 0;
   int selected_bits_y = 0, selected_bits_cb = 0, selected_bits_cr = 0;
-  while (!fits && qi < 64) {
-    qi = min(64, qi + 8);
-    const int qindex = qi <= 31 ? qi : 28 + (qi & 3);
-    const int qshift = qi <= 31 ? 0 : qi / 4 - 7;
+  int qi;
+  if (qi0 >= 32) {
+    // For qi >= 32 the loop steps by 8, so qi&3 (hence qindex) is constant for
+    // the whole search. Precompute the loop-invariant ((v*m)>>16 + v) >> sh once
+    // per coefficient, then each candidate only needs a shift plus a VLC length:
+    // no plane or matrix re-reads inside the loop.
+    const int qindex = 28 + (qi0 & 3);
     const int matrix_base = qindex * 512;
-    int bits_y = 0, bits_cb = 0, bits_cr = 0;
+    int qv_y[8], qv_cb[8], qv_cr[8];
     for (int row = 0; row < 8; ++row) {
       const int pos = row * 32 + lane;
       const int value = y_plane[y_base + row * y_stride + lane];
       const unsigned int magnitude = value < 0 ? -value : value;
-      bits_y += vlc_length(quantise_value(magnitude, matrix_m[matrix_base + pos],
-                                          matrix_sh[matrix_base + pos], qshift));
+      const unsigned int t = (magnitude * static_cast<unsigned int>(matrix_m[matrix_base + pos])) >> 16;
+      qv_y[row] = static_cast<int>((t + magnitude) >> matrix_sh[matrix_base + pos]);
     }
     if (lane < 16) {
       for (int row = 0; row < 8; ++row) {
@@ -729,31 +731,93 @@ __global__ void select_quantisers_32x8(
         int cr = cr_plane[c_base + row * c_stride + lane];
         const unsigned int cba = cb < 0 ? -cb : cb;
         const unsigned int cra = cr < 0 ? -cr : cr;
-        bits_cb += vlc_length(quantise_value(cba, matrix_m[matrix_base + 256 + pos],
-                                             matrix_sh[matrix_base + 256 + pos], qshift));
-        bits_cr += vlc_length(quantise_value(cra, matrix_m[matrix_base + 384 + pos],
-                                             matrix_sh[matrix_base + 384 + pos], qshift));
+        const unsigned int tb = (cba * static_cast<unsigned int>(matrix_m[matrix_base + 256 + pos])) >> 16;
+        const unsigned int tr = (cra * static_cast<unsigned int>(matrix_m[matrix_base + 384 + pos])) >> 16;
+        qv_cb[row] = static_cast<int>((tb + cba) >> matrix_sh[matrix_base + 256 + pos]);
+        qv_cr[row] = static_cast<int>((tr + cra) >> matrix_sh[matrix_base + 384 + pos]);
       }
     }
-    bits_y = warp_sum(bits_y);
-    bits_cb = warp_sum(bits_cb);
-    bits_cr = warp_sum(bits_cr);
-    selected_bits_y = bits_y;
-    selected_bits_cb = bits_cb;
-    selected_bits_cr = bits_cr;
-    if (lane == 0) {
-      int bytes_y = (bits_y - (255 - last_y) + 7) / 8;
-      int bytes_cb = (bits_cb - (127 - last_cb) + 7) / 8;
-      int bytes_cr = (bits_cr - (127 - last_cr) + 7) / 8;
-      bytes_y = (bytes_y + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
-      bytes_cb = (bytes_cb + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
-      bytes_cr = (bytes_cr + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
-      fits = bytes_y / slice_size_scalar <= 255 &&
-             bytes_cb / slice_size_scalar <= 255 &&
-             bytes_cr / slice_size_scalar <= 255 &&
-             4 + bytes_y + bytes_cb + bytes_cr <= max_sizes[slice];
+    qi = qi0;
+    while (!fits && qi < 64) {
+      qi = min(64, qi + 8);
+      const int qshift = qi / 4 - 7;
+      int bits_y = 0, bits_cb = 0, bits_cr = 0;
+      for (int row = 0; row < 8; ++row)
+        bits_y += vlc_length(static_cast<unsigned int>(qv_y[row] >> qshift));
+      if (lane < 16) {
+        for (int row = 0; row < 8; ++row) {
+          bits_cb += vlc_length(static_cast<unsigned int>(qv_cb[row] >> qshift));
+          bits_cr += vlc_length(static_cast<unsigned int>(qv_cr[row] >> qshift));
+        }
+      }
+      bits_y = warp_sum(bits_y);
+      bits_cb = warp_sum(bits_cb);
+      bits_cr = warp_sum(bits_cr);
+      selected_bits_y = bits_y;
+      selected_bits_cb = bits_cb;
+      selected_bits_cr = bits_cr;
+      if (lane == 0) {
+        int bytes_y = (bits_y - (255 - last_y) + 7) / 8;
+        int bytes_cb = (bits_cb - (127 - last_cb) + 7) / 8;
+        int bytes_cr = (bits_cr - (127 - last_cr) + 7) / 8;
+        bytes_y = (bytes_y + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        bytes_cb = (bytes_cb + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        bytes_cr = (bytes_cr + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        fits = bytes_y / slice_size_scalar <= 255 &&
+               bytes_cb / slice_size_scalar <= 255 &&
+               bytes_cr / slice_size_scalar <= 255 &&
+               4 + bytes_y + bytes_cb + bytes_cr <= max_sizes[slice];
+      }
+      fits = __shfl_sync(0xffffffff, fits, 0);
     }
-    fits = __shfl_sync(0xffffffff, fits, 0);
+  } else {
+    qi = max(0, qi0 - 8);
+    while (!fits && qi < 64) {
+      qi = min(64, qi + 8);
+      const int qindex = qi <= 31 ? qi : 28 + (qi & 3);
+      const int qshift = qi <= 31 ? 0 : qi / 4 - 7;
+      const int matrix_base = qindex * 512;
+      int bits_y = 0, bits_cb = 0, bits_cr = 0;
+      for (int row = 0; row < 8; ++row) {
+        const int pos = row * 32 + lane;
+        const int value = y_plane[y_base + row * y_stride + lane];
+        const unsigned int magnitude = value < 0 ? -value : value;
+        bits_y += vlc_length(quantise_value(magnitude, matrix_m[matrix_base + pos],
+                                            matrix_sh[matrix_base + pos], qshift));
+      }
+      if (lane < 16) {
+        for (int row = 0; row < 8; ++row) {
+          const int pos = row * 16 + lane;
+          int cb = cb_plane[c_base + row * c_stride + lane];
+          int cr = cr_plane[c_base + row * c_stride + lane];
+          const unsigned int cba = cb < 0 ? -cb : cb;
+          const unsigned int cra = cr < 0 ? -cr : cr;
+          bits_cb += vlc_length(quantise_value(cba, matrix_m[matrix_base + 256 + pos],
+                                               matrix_sh[matrix_base + 256 + pos], qshift));
+          bits_cr += vlc_length(quantise_value(cra, matrix_m[matrix_base + 384 + pos],
+                                               matrix_sh[matrix_base + 384 + pos], qshift));
+        }
+      }
+      bits_y = warp_sum(bits_y);
+      bits_cb = warp_sum(bits_cb);
+      bits_cr = warp_sum(bits_cr);
+      selected_bits_y = bits_y;
+      selected_bits_cb = bits_cb;
+      selected_bits_cr = bits_cr;
+      if (lane == 0) {
+        int bytes_y = (bits_y - (255 - last_y) + 7) / 8;
+        int bytes_cb = (bits_cb - (127 - last_cb) + 7) / 8;
+        int bytes_cr = (bits_cr - (127 - last_cr) + 7) / 8;
+        bytes_y = (bytes_y + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        bytes_cb = (bytes_cb + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        bytes_cr = (bytes_cr + slice_size_scalar - 1) / slice_size_scalar * slice_size_scalar;
+        fits = bytes_y / slice_size_scalar <= 255 &&
+               bytes_cb / slice_size_scalar <= 255 &&
+               bytes_cr / slice_size_scalar <= 255 &&
+               4 + bytes_y + bytes_cb + bytes_cr <= max_sizes[slice];
+      }
+      fits = __shfl_sync(0xffffffff, fits, 0);
+    }
   }
   if (lane == 0) {
     qindices[slice] = static_cast<uint8_t>(min(64, max(qbase, qi)));
