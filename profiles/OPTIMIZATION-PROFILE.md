@@ -852,3 +852,70 @@ The quantiser-search stage (56.27%) now dominates the DD encoder — it is the
 single full quantise+VLC trial per slice (already AVX2 from Round 9). The
 serialise bit-packer (15.08%) and the L1+ forward horizontal levels (5.64%)
 remain. Decoder-side work is unchanged this round.
+---
+
+# Round 13 — encoder serialise bit-packer (AVX2 prefix-sum + variable shift)
+
+## Literature review (summary)
+
+The serialise stage concatenates variable-length VLC codewords (1..18 bits)
+into an MSB-first byte stream. The scalar loop has a serial dependency chain
+on a 32-bit accumulator and bit counter. Candidate strategies surveyed:
+
+- Fixed-width SIMD bit packing (BP128/BP256, `simdcomp`, `TurboPFor`,
+  `FastPFor`) — the canonical primitive, but only for equal-width fields.
+- Prefix-sum + variable-shift + OR-reduce (varint-G8IU; Stream VByte,
+  arXiv:1709.08990) — the dominant general technique for variable widths:
+  exclusive-prefix-sum the lengths (Kogge-Stone), shift each codeword by its
+  cumulative offset (`vpsllvq`), OR-reduce the lanes.
+- BMI2 `PDEP` (x86 BMI2, Haswell+; used in `facebook/openzl` entropy decode) —
+  deposits a value's bits into a mask's set bits; fast on Intel, but scalar.
+- SWAR/branch-free scalar tricks (64-bit accumulator, batched flush).
+- AVX-512 primitives — unavailable on this AVX2-only machine.
+
+## Retained change
+
+`serialise.hpp` gained `serialise_pack_codewords`, which packs four codewords
+per AVX2 group: a two-step Kogge-Stone prefix sum of the four lengths, four
+64-bit variable shifts, an OR-reduce, and a merge into a 64-bit left-aligned
+accumulator with a write-ahead flush (matching the scalar's byte-exact
+MSB-first output). Groups whose total bit-length would overflow the remaining
+accumulator headroom fall back to the scalar step. Both slice loop bodies now
+delegate to this helper. A cached CPUID check selects the path at runtime.
+
+## Results (pinned 60-frame medians, before vs after)
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 33.67 fps | 34.55 fps | **+2.6%** |
+| DD13/7 encoder | 31.61 fps | 32.10 fps | **+1.6%** |
+
+The serialise stage dropped from ~26.9ms to ~25.8ms (5 frames).
+
+## Bottleneck finding (measured)
+
+A read-only experiment (loads without packing: ~10.2ms) versus the full pack
+(~25.8ms) shows the stage is roughly 40% DRAM-bound on the intermediate
+codeword/wordlength arrays (18.7MB/frame working set, which exceeds the 15MB
+L3) and 60% packing compute. The SIMD trims only the compute half, which is
+why the gain is modest. The codeword/wordlength arrays are written by the
+quantiser-search and re-read by the serialiser; fusing the two stages (packing
+directly during the final quantiser trial) would eliminate both the ~18.7MB
+write and the ~18.7MB read and is the remaining large lever.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7, DD13/7 and Haar0 encoder streams byte-identical between the AVX2 and
+  scalar serialiser paths (forced-scalar A/B):
+  Haar0 `E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`,
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search (55%) remains the dominant encoder cost. The strongest
+remaining lever is fusing quantise+encode with the serialiser so the final
+quantiser trial packs bits directly into the output buffer, eliminating the
+intermediate codeword/wordlength arrays (and their write+read traffic). The
+L1+ forward horizontal levels (5.6%) are the last un-vectorised transform.
