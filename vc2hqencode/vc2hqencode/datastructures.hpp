@@ -42,6 +42,8 @@ public:
   int istride[3];
   uint16_t *codewords[3];
   uint8_t  *wordlengths[3];
+  uint8_t  *packed[3];
+  uint8_t   packed_valid[3];
   int padding;
   int y;
   int x;
@@ -56,6 +58,7 @@ public:
 
     mCodeWords   = (uint16_t *)VC2_ALIGNED_ALLOC(64, w*h*sizeof(uint16_t)*n*3);
     mWordLengths = (uint8_t  *)VC2_ALIGNED_ALLOC(64, w*h*sizeof(uint8_t)*n*3);
+    mPacked      = (uint8_t  *)VC2_ALIGNED_ALLOC(64, w*h*3*n*3);
 
     width[0]  = w;
     height[0] = h;
@@ -84,6 +87,12 @@ public:
         slices[i].wordlengths[1] = &mWordLengths[w*h*(3*i + 1)];
         slices[i].codewords[2]   = &mCodeWords[w*h*(3*i + 2)];
         slices[i].wordlengths[2] = &mWordLengths[w*h*(3*i + 2)];
+        slices[i].packed[0]      = &mPacked[w*h*3*(3*i + 0)];
+        slices[i].packed[1]      = &mPacked[w*h*3*(3*i + 1)];
+        slices[i].packed[2]      = &mPacked[w*h*3*(3*i + 2)];
+        slices[i].packed_valid[0] = 0;
+        slices[i].packed_valid[1] = 0;
+        slices[i].packed_valid[2] = 0;
         slices[i].y = y;
         slices[i].x = x;
       }
@@ -94,6 +103,7 @@ public:
     delete[] slices;
     VC2_ALIGNED_FREE(mCodeWords);
     VC2_ALIGNED_FREE(mWordLengths);
+    VC2_ALIGNED_FREE(mPacked);
   }
 
   int width[3];
@@ -106,6 +116,7 @@ public:
 private:
   uint16_t *mCodeWords;
   uint8_t  *mWordLengths;
+  uint8_t  *mPacked;
 };
 
 template<class T> struct VideoPlane {

@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <immintrin.h>
 #include "platform_variant.hpp"
+#include "bitpack.hpp"
 
 template<int w, int h, int d, class T> inline void encode_slice_component(CodedSlice<T> *slice, int c, QuantisationMatrices *matrices);
 
@@ -324,14 +325,15 @@ static const uint16_t SCAN_POS_32x8[256] = {
 
 // AVX2 quantize+encode of a full 32x8x3 slice component: 8 samples per
 // iteration with the quantisation (mulhi) and the merged codeword/length
-// table lookup (gather) vectorized; the codeword/wordlength stores stay
-// scalar because the bitstream scan order scatters them.
+// table lookup (gather) vectorized. Codewords scatter into stack buffers (in
+// scan order), then pack directly into slice->packed[c] so the serialiser
+// memcpy's the bits instead of re-reading the codeword/wordlength arrays.
 static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice, int c,
                                                        const uint16_t *m, const uint8_t *sh,
                                                        uint8_t qshift) {
   const int istride = slice->istride[c];
-  uint16_t *codewords = slice->codewords[c];
-  uint8_t *wordlengths = slice->wordlengths[c];
+  uint16_t cwbuf[256];
+  uint8_t  lnbuf[256];
   int length = 0;
   int samples = -1;
   const __m256i ZERO256 = _mm256_setzero_si256();
@@ -384,8 +386,8 @@ static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice
       for (int j = 0; j < 8; j++) {
         const int n = scanr[j];
         length += ln8[j];
-        codewords[n] = cw8[j];
-        wordlengths[n] = ln8[j];
+        cwbuf[n] = cw8[j];
+        lnbuf[n] = ln8[j];
       }
       scanr += 8;
     }
@@ -394,6 +396,8 @@ static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice
   length -= (255 - samples);
   slice->length[c] = (length + 7) / 8;
   slice->samples[c] = samples + 1;
+  bitpack_pack(slice->packed[c], cwbuf, lnbuf, samples + 1);
+  slice->packed_valid[c] = 1;
 }
 
 template<> inline void encode_slice_component<32,8,3, int16_t>(CodedSlice<int16_t> *slice, int c, QuantisationMatrices *matrices) {
