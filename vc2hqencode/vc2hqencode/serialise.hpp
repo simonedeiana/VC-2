@@ -32,11 +32,11 @@
 #include "debug.hpp"
 
 #include <x86intrin.h>
+#include <string.h>
+#include "bitpack.hpp"
 
 template<class T> void serialise_slices(CodedSlice<T> *slices, int n_slices, char *odata, int olength, int n_samples, int slice_size_scalar, int slices_per_frag, uint32_t picnum, uint32_t *final_offset, int sx, int sy, int slices_per_line) {
   int ocounter = 0;
-  int bits = 0;
-  uint32_t accum = 0x00;
   uint8_t *optr = (uint8_t *)odata;
 
   uint16_t *codewords   = slices[0].codewords[0];
@@ -136,21 +136,12 @@ template<class T> void serialise_slices(CodedSlice<T> *slices, int n_slices, cha
 #endif
       }
 
-      accum = 0;
-      for (int n = 0; n < slices[N].samples[c]; n++) {
-        int l = wordlengths[n];
-        accum |= (((uint32_t)codewords[n]) << (32 - l - bits));
-        bits += l;
-
-        *((uint32_t *)&optr[ocounter]) = __builtin_bswap32(accum);
-        accum <<= (bits/8)*8;
-        ocounter += (bits/8);
-        bits%=8;
+      if (slices[N].packed_valid[c]) {
+        memcpy(&optr[ocounter], slices[N].packed[c], slices[N].length[c]);
+        ocounter += slices[N].length[c];
+      } else {
+        ocounter += bitpack_pack(&optr[ocounter], codewords, wordlengths, slices[N].samples[c]);
       }
-
-      if (bits)
-        optr[ocounter++] = (accum >> 24) | (0xFF >> bits);
-      bits = 0;
 
       for (int n = 0; n < p; n++) {
         optr[ocounter++] = 0xFF;
@@ -235,40 +226,12 @@ template<class T> void serialise_slices(CodedSlice<T> *slices, int n_slices, cha
         optr[ocounter++] = (uint8_t)((l + p)/slice_size_scalar);
       }
 
-      accum = 0;
-      for (int n = 0; n < slices[N].samples[c]; n++) {
-        int l = wordlengths[n];
-        accum |= (((uint32_t)codewords[n]) << (32 - l - bits));
-        bits += l;
-
-        if (bits >= 8) {
-          optr[ocounter++] = accum >> 24;
-          accum <<= 8;
-          bits -= 8;
-
-          if (bits >= 8) {
-            optr[ocounter++] = accum >> 24;
-            accum <<= 8;
-            bits -= 8;
-
-            if (bits >= 8) {
-              optr[ocounter++] = accum >> 24;
-              accum <<= 8;
-              bits -= 8;
-
-              if (bits >= 8) {
-                optr[ocounter++] = accum >> 24;
-                accum <<= 8;
-                bits -= 8;
-              }
-            }
-          }
-        }
+      if (slices[N].packed_valid[c]) {
+        memcpy(&optr[ocounter], slices[N].packed[c], slices[N].length[c]);
+        ocounter += slices[N].length[c];
+      } else {
+        ocounter += bitpack_pack(&optr[ocounter], codewords, wordlengths, slices[N].samples[c]);
       }
-
-      if (bits)
-        optr[ocounter++] = (accum >> 24) | (0xFF >> bits);
-      bits = 0;
 
       for (int n = 0; n < p; n++) {
         optr[ocounter++] = 0xFF;

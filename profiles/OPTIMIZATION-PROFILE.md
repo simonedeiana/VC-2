@@ -282,3 +282,685 @@ in one interleaved loop.
 - Six of six native CTest targets passed; conformance validator clean.
 - Encoder untouched (still `4e45ed1c...` at the same config).
 
+---
+
+# Round 4 — single-thread pointer-alias refinement
+
+Date: 2026-08-13
+
+## Result
+
+The retained change adds `__restrict` qualifiers to the input and output
+buffers of the inlined `vlc_step_ex` SSE4.2 decoder step. This gives MSVC
+permission to assume that the compressed-byte input and coefficient output do
+not alias while it schedules the LUT/state chain and SIMD stores.
+
+In the fixed 1920x1080, Haar0, 30-frame, one-worker benchmark, the decoder
+measured 68.962 fps over 15 runs with the change. The no-change comparison
+measured 67.874 fps over 9 runs. The samples are from separate runs, so this
+is recorded as a small observed improvement rather than a strict alternating
+A/B claim. The encoder annotation trial was removed because it did not produce
+a stable gain.
+
+The final stage profile remains VLC-dominated:
+
+| Stage | Worker time |
+|---|---:|
+| vlc-decode | 60.38% |
+| dequantise | 12.60% |
+| inverse-vertical | 6.62% |
+| inverse-horizontal | 4.57% |
+| final-horizontal+output | 15.83% |
+
+## Verification
+
+- Six of six native CTest targets passed after the final build.
+- A fresh one-frame stream passed the installed VC-2 bitstream validator with
+  `No errors found in bitstream`.
+- The encoder stream remained byte-identical to the pre-change stream
+  (`D5DD1542CAC95E70AC273321B6CE685C76EEC9B0F5F6904B1DD40794B1D08709`).
+
+---
+
+# Round 5 — DD9/7 and DD13/7 transform SIMD
+
+Date: 2026-08-13
+
+## Coverage
+
+The supported encoder wavelets were swept at one worker on the fixed
+1920x1080, 10-bit 4:2:2, Haar0-style 30-frame workload. Fidelity is exposed
+by the command-line help but is rejected by the current encoder dispatch as an
+invalid wavelet, so it has no valid encoder benchmark. The scalar DD9/7 and
+DD13/7 inverse paths were the clear transform-specific bottleneck.
+
+Their initial stage profiles put inverse vertical lifting at 43.01% and
+43.27% of decoder worker time respectively. The existing implementation was
+scalar C++ for these filters, unlike the already-vectorized Haar and LeGall
+paths.
+
+## Retained change
+
+- Added SSE4.2 four-column kernels for the finest-level DD9/7 and DD13/7
+  inverse vertical transforms. Each SIMD lane is an independent image column;
+  the scalar lifting recurrence is preserved within each lane.
+- Kept the existing scalar implementation as the fallback for short or
+  non-four-column geometries.
+- Left final horizontal/output scalar. A row-interleaved DD9 trial was
+  byte-identical but regressed the decoder from 38.3 fps to 35.6 fps because
+  its strided row loads and stores outweighed the vector arithmetic.
+
+The corresponding DD13/7 encoder vertical-kernel trial was rejected. Nine
+alternating runs measured 19.019 fps for the scalar dispatch and 18.642 fps
+for the SIMD dispatch, a 1.98% regression. The trial stream was nevertheless
+byte-identical to the scalar stream, so no encoder dispatch change was kept.
+
+## Same-session A/B results
+
+Nine alternating 30-frame runs, scalar dispatch versus SIMD dispatch:
+
+| Transform | Scalar | SIMD | Improvement |
+|---|---:|---:|---:|
+| DD9/7 decoder | 27.985 fps | 33.861 fps | **+21.00%** |
+| DD13/7 decoder | 24.834 fps | 29.970 fps | **+20.68%** |
+
+The final profile still shows final horizontal/output as the next major
+transform cost (about 34–35%), followed by inverse vertical at about 29–30%.
+
+## Verification
+
+- Six of six native CTest targets passed after the retained kernels were
+  restored.
+- Scalar and SIMD DD9/7 decoder output hashes matched:
+  `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`.
+- Scalar and SIMD DD13/7 decoder output hashes matched:
+  `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Fresh DD9/7 and DD13/7 one-frame streams were accepted by the installed
+  validator; no bitstream errors were reported.
+
+## Research follow-up
+
+The implementation follows the established vertical-lane strategy described
+in SIMD lifting literature: vectorize independent columns while keeping the
+lifting dependency chain within each lane. The 2-D lifting literature also
+emphasizes cache-aware treatment of vertical versus horizontal filtering; that
+matches the current profile, where horizontal output is now the limiting
+stage. See [Vectorization of the 2D Wavelet Lifting Transform Using SIMD
+Extensions](https://www.researchgate.net/publication/220951124_Vectorization_of_the_2D_Wavelet_Lifting_Transform_Using_SIMD_Extensions),
+[A Single-Loop Approach to SIMD Parallelization of 2-D Wavelet
+Lifting](https://www.researchgate.net/publication/221392398_A_Single-Loop_Approach_to_SIMD_Parallelization_of_2-D_Wavelet_Lifting),
+and the [JPEG 2000 lifting-transform specification](https://www.itu.int/epublications/publication/itu-t-t-801-v3-2023-08-08-jpeg-2000-image-coding-system-extensions).
+
+
+---
+
+# Round 6 � DD9/7 and DD13/7 final horizontal SIMD (rejected)
+
+Date: 2026-08-13
+
+## Coverage
+
+Continuation of the Round 5 transform work. Stage profiling put the
+final-horizontal+output stage at 34.49% (DD9/7) and ~35% (DD13/7) of decoder
+worker time, making it the largest transform cost. The goal was to vectorize
+the scalar final horizontal recurrence.
+
+## Analysis
+
+The scalar final-H looks like a serial recurrence along x (state carried
+between iterations), but every output depends only on loaded samples:
+
+- DD9/7: even `out[p] = D[p] = X[p] - ((X[p-1]+X[p+1]+2)>>2)`;
+  odd `out[p] = X[p] + ((-D[p-3]+9*D[p-1]+9*D[p+1]-D[p+3]+8)>>4)`.
+- DD13/7: same odd formula, with predict
+  `D[p] = X[p] - ((-X[p-3]+9*X[p-1]+9*X[p+1]-X[p+3]+16)>>5)`.
+
+It is therefore a parallel column stencil, vectorizable with contiguous
+loads/stores (unlike the rejected Round 5 row-interleaved trial). SSE4.2
+kernels were written that compute four output columns per block from two
+(DD9) or three (DD13) 16-byte window loads, extracting the strided even/odd
+operand lanes with byte shuffles, and keeping D in int32. Boundary columns
+reproduced the exact scalar mirrors (traced from the C tail: left
+X[-1]->X[1], X[-3]->X[3]; right DD9 D[W]->D[W-2], D[W+2]->D[W-4]; DD13
+X[W+1]->X[W-1], D[W]->D[W-2], D[W+2]->D[W-4]).
+
+## Result (rejected)
+
+The kernels were byte-identical (SHA-256 matched the recorded hashes; the
+full inverse-transform test suite passed for active_bits 10 and 12 across all
+crop offsets), but they were SLOWER than the existing scalar code:
+
+| Kernel | Scalar | SSE4.2 (new) |
+|---|---:|---:|
+| DD9/7 final-H | 6.91 ms/frame | 8.15 ms/frame |
+| DD13/7 final-H | 7.41 ms/frame | 10.55 ms/frame |
+
+Pinned, interleaved microbenchmark on 1920x1080 int16 data. The full decoder
+benchmark was unchanged (39.983 fps vs 39.998 fps baseline) and the stage
+profile was unchanged (34.23% vs 34.49%), confirming the stage is
+memory-bound in the real decode (reads the coefficient plane, writes the
+uint16 output plane), so compute SIMD cannot help.
+
+Root cause: Haswell executes shuffles and `cvtepi16_epi32` widenings on a
+single port (p5); the extraction-heavy kernel needs ~1-2 p5 operations per
+output, whereas the MSVC-generated scalar is already well scheduled and the
+real decode is store-limited. The compact de-interleave alternative would
+still be p5-limited and cannot beat the memory wall.
+
+## Actions
+
+- Reverted the final-H kernels, dispatch, and test additions (working tree
+  restored to Round 5 commit `7a55308`; encoder `__restrict` VLC work in the
+  working tree was untouched).
+- Verified hashes still match after revert: DD9
+  `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`, DD13
+  `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+
+## Research follow-up
+
+The negative result isolates the boundary between compute-bound and
+memory-bound stages on this CPU. The DD final-H is memory-bound, so the next
+transform target should be the inverse-vertical stage (~29% of DD9/7 decoder
+time, already SSE4.2; an AVX2 eight-column variant would halve loop/state
+overhead) or the VLC decode stage (24% for DD9/7, 61% for Haar0), not the
+final-H arithmetic.
+
+---
+
+# Round 7 � DD9/7 and DD13/7 AVX2 inverse vertical
+
+Date: 2026-08-13
+
+## Coverage
+
+Round 5 left the DD9/7 and DD13/7 finest-level inverse vertical transforms as
+SSE4.2 four-column kernels (one SIMD lane per image column, int16 -> int32
+widening). The inverse-vertical stage was still 29.25% (DD9/7) of decoder
+worker time, and it was the last compute-bound transform stage (Round 6
+showed the final horizontal stage is memory-bound, so SIMD cannot help
+there).
+
+## Retained change
+
+- Added an AVX2 eight-column variant of the DD9/7 and DD13/7 finest-level
+  inverse vertical kernels in a new `vc2invtransform_avx2` static library
+  (compiled with `/arch:AVX2`, mirroring the encoder's `vc2transform_avx2`).
+  The lifting structure is identical to the SSE4.2 kernels; only the width
+  doubles (8 lanes per iteration, `_mm256_cvtepi16_epi32` loads and
+  truncating `shuffle_epi8` + `unpacklo_epi64` stores).
+- New `get_invvtransform_avx2` dispatch returns the AVX2 kernels for the DD
+  finest level and otherwise falls back to `get_invvtransform_sse4_2`.
+- The decoder selects the AVX2 dispatch when runtime detection reports AVX2
+  (checked after the SSE4.2 block, so AVX2 wins only for the transforms that
+  have AVX2 kernels).
+- Added DD9/7 and DD13/7 vertical test rows (with an AVX2 check) to the
+  inverse-transform test suite.
+
+## Same-session A/B results
+
+Pinned, interleaved microbenchmark on 1920x1080 int16 data (scalar vs SSE4.2
+vs AVX2 full-plane finest-level V):
+
+| Kernel | Scalar | SSE4.2 | AVX2 |
+|---|---:|---:|---:|
+| DD9/7 V | 4.25 ms/frame | 1.42 ms/frame | 0.76 ms/frame |
+| DD13/7 V | 4.61 ms/frame | 1.62 ms/frame | 0.83 ms/frame |
+
+Full decoder (seven pinned runs, median):
+
+| Transform | Before (SSE4.2 V) | After (AVX2 V) | Improvement |
+|---|---:|---:|---:|
+| DD9/7 decoder | 39.998 fps | 41.377 fps | **+3.45%** |
+| DD13/7 decoder | 37.521 fps | 39.130 fps | **+4.29%** |
+
+The inverse-vertical stage profile dropped from 29.25% to 25.10% of decoder
+worker time (DD9/7). The final-horizontal+output stage is now the largest
+(36.55%) but is memory-bound (Round 6).
+
+## Verification
+
+- Six of six native CTest targets passed (including the new AVX2 DD V rows).
+- Decoder output hashes unchanged:
+  DD9 `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`,
+  DD13 `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Fallback geometry (width not a multiple of 8) still routes to the scalar
+  implementation.
+
+## Research follow-up
+
+The 8-column AVX2 kernel roughly halves the loop/state overhead of the
+4-column SSE4.2 kernel and doubles the arithmetic width; on this Haswell CPU
+the measured 1.9-2x kernel speedup confirms the vertical lifting recurrence
+is compute-bound rather than port-bound at 8 lanes. The natural next targets
+are the remaining compute-heavy stages: VLC decode (24% DD9/7, 61% Haar0) and
+the coarser-level inverse vertical transforms (still scalar int16).
+
+---
+
+# Round 8 � Parallel DD9/7 and DD13/7 final horizontal + streaming stores
+
+Date: 2026-08-14
+
+## Coverage
+
+Round 6 had rejected SIMD for the Deslauriers-Dubuc final horizontal stage
+because the shuffle-heavy SSE4.2 attempt was slower than scalar, and the stage
+appeared memory-bound. Re-investigating with the same benchmark/profile/optimize
+cycle on the `bold-experiments` branch showed the stage was actually
+compute-bound on the serial lifting recurrence (7.69 ms/frame cached, vs a
+0.31 ms store floor), and that the earlier failure was the per-operand shuffle
+extraction, not the idea of parallelizing.
+
+## Retained changes
+
+- **AVX2 two-pass DD9/7 and DD13/7 final horizontal kernels.** The scalar
+  recurrence is a parallel column stencil. A two-pass-per-row scheme breaks
+  the serial dependency without shuffle extraction:
+  - pass 1 de-interleaves 8 int16 samples into even/odd, widens to int32,
+    computes the compact even D vector, and stores it to a small stack
+    scratch buffer (thread-safe, L1-resident);
+  - pass 2 reads D contiguously, forms the four sliding update windows with
+    two 128-bit loads and `alignr`, and writes 8 uint16 outputs with a
+    non-temporal store.
+  The 13/7 predict (5-tap) carries two odd samples and one look-ahead sample
+  per pass-1 block; the update/output half is shared with the 9/7 version.
+  Boundary mirrors (left X[-1]->X[1], X[-3]->X[3]; right D[W]->D[W-2],
+  D[W+2]->D[W-4], X[W+1]->X[W-1]) are handled by padding the compact D
+  buffer. The kernel supports the decoder's 32-pixel slice-overlap crop
+  (computes the full input width, stores only the valid output range).
+- **Non-temporal output stores in the Haar final horizontal kernel** (guarded
+  by 16-byte alignment). The output plane is write-only, so streaming stores
+  avoid the read-for-ownership traffic of a normal write-allocate store.
+- Added `#pragma once` to the two scalar DD transform headers (they lacked
+  include guards, which broke the new AVX2 headers that include them).
+
+## Same-session A/B results
+
+Pinned interleaved microbenchmark, 1920x1080 int16 (cached):
+
+| Kernel | Scalar | AVX2 (new) |
+|---|---:|---:|
+| DD9/7 final-H | 7.69 ms/frame | 1.49 ms/frame |
+| DD13/7 final-H | ~7.4 ms/frame | ~1.5 ms/frame |
+
+Full decoder (eleven pinned runs, median):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| Haar0 decoder | 73.353 fps | 76.566 fps | **+4.4%** |
+| DD9/7 decoder | 41.866 fps | 52.167 fps | **+24.6%** |
+| DD13/7 decoder | 39.135 fps | 48.781 fps | **+24.7%** |
+
+The DD9/7 stage profile shows final-horizontal+output falling from 36.38% to
+21.00% of decoder worker time; VLC decode (31.67%) and inverse vertical
+(31.30%) are now the two largest stages.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Decoder output hashes unchanged:
+  DD9 `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`,
+  DD13 `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Crop, short, and misaligned geometries fall back to the scalar
+  implementation unchanged.
+
+## Research follow-up
+
+The two-pass "compute compact detail coefficients, then sweep with a sliding
+window" pattern avoids both the serial recurrence and the shuffle extraction
+that defeated earlier attempts; it generalizes to any separable lifting
+stencil. The next largest targets are VLC decode (now the top DD9/7 stage at
+~32%, and ~62% for Haar0) and the still-scalar coarser-level inverse vertical
+transforms.
+
+---
+
+# Round 9 � AVX2 vectorized quantize + VLC lookup in the encoder
+
+Date: 2026-08-14
+
+## Coverage
+
+The encoder was dominated by the quantiser-search stage (73.46% of worker
+time), which for EIGHTHSEARCH is the full quantize+VLC of each slice
+(`encode_slice_component<32,8,3,int16_t>` emits codewords during the search's
+final size trial and reuses them, so the search is the encode). The per-sample
+`encode_sample` does a reciprocal-multiply quantisation, a merged
+codeword/length table lookup (`CLWLUT`), two scattered stores (codeword and
+wordlength, in bitstream scan order), and a last-non-zero tracking branch.
+
+## Retained change
+
+- **AVX2 vectorization of the quantisation and CLWLUT lookup** in a new
+  `encode_slice_component_32x8x3_avx2` path, selected at runtime when AVX2 is
+  present, with the existing hand-unrolled scalar specialization as the
+  fallback. Eight samples per iteration: `abs`, `mulhi` (16x16->32 high half,
+  replacing the scalar reciprocal division), variable shifts (`srlv`), and an
+  AVX2 gather over `CLWLUT` produce the codeword and length vectors. The
+  codeword/wordlength stores stay scalar because the bitstream scan order
+  scatters them; the last-non-zero tracking is done branchlessly with a
+  horizontal max over the scan positions.
+- Added a cached runtime AVX2 check (`encode_has_avx2`, CPUID leaf 7) local
+  to the header.
+- The scan-order permutation table was extracted programmatically from the
+  hand-unrolled scalar specialization.
+
+## Same-session A/B results
+
+Pinned microbenchmark of the quantize+lookup kernel (8 samples/iter):
+
+| Kernel | Scalar | AVX2 |
+|---|---:|---:|
+| quantize+lookup | 2.19 ns/sample | 0.61 ns/sample |
+
+Full encoder (eleven pinned runs, median, 60 frames):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| Encoder (Haar0) | 35.147 fps | 40.789 fps | **+16.1%** |
+
+The quantiser-search stage dropped from 73.46% to 69.79% of encoder worker
+time; serialise is now the second-largest stage (18.61%).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Encoder stream byte-identical: the AVX2 and forced-scalar builds produced
+  the same 1-frame stream SHA-256
+  (`E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`).
+- Round-trip verified: the AVX2-encoded stream decodes successfully.
+
+## Research follow-up
+
+The remaining encoder cost is the scattered codeword/wordlength stores (scan
+order) and the serialise bit-packer (18.61%). A future step could fuse the
+bit-packing into the encode to eliminate the intermediate arrays and the
+separate serialise pass, or reorder the coefficient storage so the scan order
+is contiguous. The vectorized-gather pattern (mulhi + srlv + i32gather) is the
+same one that made the decoder VLC lookup fast.
+
+---
+
+# Round 10 � AVX2 DD9/7 and DD13/7 forward vertical transforms (encoder)
+
+Date: 2026-08-14
+
+## Coverage
+
+For Deslauriers-Dubuc content the encoder's vertical-wavelet stage was the
+largest transform cost (32.37% of DD9/7 worker time) and was entirely scalar:
+the encoder's AVX2 dispatch covered Haar and LeGall only. The DD forward
+vertical lifting is the same per-column recurrence as the inverse (predict
+`(a+b+2)>>2`, update `(-a+9b+9c-d+8)>>4`, plus the 13/7 five-tap predict),
+just applied in the forward order, so the same 8-column SIMD strategy that
+accelerated the decoder's inverse vertical applies.
+
+## Retained change
+
+- Added AVX2 eight-column forward vertical kernels for DD9/7 and DD13/7 in
+  the encoder's `vc2transform_avx2` library (level 0 / skip 1, int16 -> int32
+  widening, one SIMD lane per image column). The scalar lifting recurrence is
+  preserved within each lane; the prologue/main/tail structure mirrors the
+  scalar reference exactly. Short, unaligned, or coarser-level geometries
+  fall back to the scalar template.
+- Wired the two kernels into `get_vtransform_avx2` (runtime AVX2 dispatch,
+  which the encoder already selects when AVX2 is present).
+
+## Same-session A/B results
+
+Pinned 60-frame medians, scalar dispatch vs AVX2 dispatch:
+
+| Workload | Scalar | AVX2 | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 25.63 fps | 30.69 fps | **+19.7%** |
+| DD13/7 encoder | 23.23 fps | 28.14 fps | **+21.1%** |
+
+The DD9/7 vertical-wavelet stage dropped from 32.37% to 14.31% of encoder
+worker time. The Haar0 encoder is unaffected (41.24 fps).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  forced-scalar builds:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The encoder's DD forward horizontal transforms (input+horizontal-L0 at 18.22%
+and horizontal-wavelet-L1+ at 5.31%) remain scalar and are the next
+transform target, followed by the coarser-level forward vertical levels
+(skip 2/4/8). The serialise bit-packer (13.15%) is the remaining
+non-transform cost.
+
+---
+
+# Round 11 — encoder DD forward HORIZONTAL input transform (AVX2)
+
+## Analysis
+
+After the forward vertical kernels (Round 10), the DD9/7 encoder's remaining
+transform cost was dominated by `input+horizontal-L0` (18.22%) — the initial
+horizontal lifting applied to the raw 10P2 input row before the vertical
+wavelet. That stage is the `Deslauriers_Dubuc_*_transform_H_inplace_10P2`
+template, a serial lifting recurrence along each row.
+
+The scalar recurrence is a parallel column stencil, so the same two-pass
+approach used for the decoder's inverse final-H applies here:
+
+1. de-interleave the uint16 row into even/odd int32 scratch, converting each
+   sample with `(v-512)<<1`;
+2. compute the odd outputs `O[j] = odd - update(even[j-1..j+2])` from compact
+   even reads (sliding `alignr` windows);
+3. compute the even outputs `E[j] = even + predict(O[j-1..O[j+1])`,
+   interleave E/O and store as int16.
+
+DD9/7 uses a 2-tap predict `(a+b+2)>>2`; DD13/7 uses the 5-tap
+`(-a+9b+9c-d+16)>>5`. The mirror boundary pads (traced from the scalar
+prologue/tail) are filled into the scratch arrays before passes 2 and 3, so
+the inner loops have no branches.
+
+## Retained change
+
+- Added `Deslauriers_Dubuc_9_7_transform_H_inplace_10P2_avx2` and
+  `Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2` in the encoder's
+  `vc2transform_avx2` library, wired into `get_htransforminitial_avx2` for
+  the 10P2/int16 dispatch. Short (<16), non-multiple-of-8, or short-height
+  geometries fall back to the scalar template. The overlap mirror-fill and
+  bottom-row copy stay scalar (identical to the reference).
+
+## Same-session A/B results
+
+Pinned 60-frame medians, before vs after (both builds already include the
+Round 10 forward vertical kernels):
+
+| Workload | Before (V only) | After (V+H) | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 30.69 fps | 31.84 fps | **+3.7%** |
+| DD13/7 encoder | 28.14 fps | 29.93 fps | **+6.4%** |
+
+The DD9/7 input+horizontal-L0 stage dropped from 18.22% to 12.80% of encoder
+worker time. Cumulative encoder gains (scalar baseline -> now): DD9/7
+25.63 -> 31.84 fps (**+24.2%**), DD13/7 23.23 -> 29.93 fps (**+28.8%**).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  scalar dispatches:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+Remaining encoder targets: the coarser forward vertical levels (skip 2/4/8),
+the L1+ forward horizontal levels (5.01%), and the serialise bit-packer
+(14.54%). The quantiser-search stage (54.20%) now dominates the DD encoder.
+
+---
+
+# Round 12 — encoder DD strided forward vertical (coarser levels, AVX2)
+
+## Analysis
+
+The DD forward vertical AVX2 kernels from Round 10 only handled level 0
+(skip 1). Levels 1 and 2 (skip 2 and 4, the LL subbands) still fell through
+to the scalar template. The wavelet levels store the LL subband interleaved
+(even rows/columns), so the level-1/2 vertical transforms walk strided
+memory rather than contiguous rows.
+
+The scalar lifting recurrence is identical; only the column access changes.
+For skip 2 the 8 columns sit at even int16 positions of a 16-sample span, so
+the load is a two-lane de-interleave and the store is a read-modify-write
+that re-interleaves the computed columns around the untouched odd columns.
+For skip 4 the 4 columns sit at positions 0/4/8/12 of a 16-sample span, so a
+128-bit four-lane kernel with `pshufb`+`pblendw` handles load/store.
+
+## Retained change
+
+- Added `*_V_inplace_avx2_s2` and `*_V_inplace_avx2_s4` for DD9/7 and DD13/7
+  in the encoder's `vc2transform_avx2` library, wired into
+  `get_vtransform_avx2` levels 1 and 2. Geometry falls back to the scalar
+  template when the stride assumptions (width multiple of 16, sufficient
+  height) do not hold.
+
+## Same-session A/B results
+
+Pinned 60-frame medians, before vs after (both builds include Rounds 9-11):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 31.84 fps | 33.67 fps | **+5.7%** |
+| DD13/7 encoder | 29.93 fps | 31.61 fps | **+5.6%** |
+
+The DD9/7 vertical-wavelet stage dropped from 13.44% to 9.27% of encoder
+worker time. Cumulative encoder gains (scalar baseline -> now): DD9/7
+25.63 -> 33.67 fps (**+31.4%**), DD13/7 23.23 -> 31.61 fps (**+36.1%**).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  scalar dispatches:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search stage (56.27%) now dominates the DD encoder — it is the
+single full quantise+VLC trial per slice (already AVX2 from Round 9). The
+serialise bit-packer (15.08%) and the L1+ forward horizontal levels (5.64%)
+remain. Decoder-side work is unchanged this round.
+---
+
+# Round 13 — encoder serialise bit-packer (AVX2 prefix-sum + variable shift)
+
+## Literature review (summary)
+
+The serialise stage concatenates variable-length VLC codewords (1..18 bits)
+into an MSB-first byte stream. The scalar loop has a serial dependency chain
+on a 32-bit accumulator and bit counter. Candidate strategies surveyed:
+
+- Fixed-width SIMD bit packing (BP128/BP256, `simdcomp`, `TurboPFor`,
+  `FastPFor`) — the canonical primitive, but only for equal-width fields.
+- Prefix-sum + variable-shift + OR-reduce (varint-G8IU; Stream VByte,
+  arXiv:1709.08990) — the dominant general technique for variable widths:
+  exclusive-prefix-sum the lengths (Kogge-Stone), shift each codeword by its
+  cumulative offset (`vpsllvq`), OR-reduce the lanes.
+- BMI2 `PDEP` (x86 BMI2, Haswell+; used in `facebook/openzl` entropy decode) —
+  deposits a value's bits into a mask's set bits; fast on Intel, but scalar.
+- SWAR/branch-free scalar tricks (64-bit accumulator, batched flush).
+- AVX-512 primitives — unavailable on this AVX2-only machine.
+
+## Retained change
+
+`serialise.hpp` gained `serialise_pack_codewords`, which packs four codewords
+per AVX2 group: a two-step Kogge-Stone prefix sum of the four lengths, four
+64-bit variable shifts, an OR-reduce, and a merge into a 64-bit left-aligned
+accumulator with a write-ahead flush (matching the scalar's byte-exact
+MSB-first output). Groups whose total bit-length would overflow the remaining
+accumulator headroom fall back to the scalar step. Both slice loop bodies now
+delegate to this helper. A cached CPUID check selects the path at runtime.
+
+## Results (pinned 60-frame medians, before vs after)
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 33.67 fps | 34.55 fps | **+2.6%** |
+| DD13/7 encoder | 31.61 fps | 32.10 fps | **+1.6%** |
+
+The serialise stage dropped from ~26.9ms to ~25.8ms (5 frames).
+
+## Bottleneck finding (measured)
+
+A read-only experiment (loads without packing: ~10.2ms) versus the full pack
+(~25.8ms) shows the stage is roughly 40% DRAM-bound on the intermediate
+codeword/wordlength arrays (18.7MB/frame working set, which exceeds the 15MB
+L3) and 60% packing compute. The SIMD trims only the compute half, which is
+why the gain is modest. The codeword/wordlength arrays are written by the
+quantiser-search and re-read by the serialiser; fusing the two stages (packing
+directly during the final quantiser trial) would eliminate both the ~18.7MB
+write and the ~18.7MB read and is the remaining large lever.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7, DD13/7 and Haar0 encoder streams byte-identical between the AVX2 and
+  scalar serialiser paths (forced-scalar A/B):
+  Haar0 `E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`,
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search (55%) remains the dominant encoder cost. The strongest
+remaining lever is fusing quantise+encode with the serialiser so the final
+quantiser trial packs bits directly into the output buffer, eliminating the
+intermediate codeword/wordlength arrays (and their write+read traffic). The
+L1+ forward horizontal levels (5.6%) are the last un-vectorised transform.
+
+---
+
+# Round 14 — fuse quantise+encode with the serialiser
+
+## Change
+
+The serialiser no longer re-reads the `codeword`/`wordlength` arrays. The
+AVX2 quantise path scatters codewords into stack buffers and packs them
+directly into a new per-slice `packed[c]` buffer (via the shared SIMD
+bit-packer from Round 13, now in `bitpack.hpp`), setting a `packed_valid[c]`
+flag. The serialiser memcpy's `packed[c]` (`length[c]` bytes) when the flag is
+set, and falls back to packing the arrays otherwise (non-AVX2 or non-32x8x3
+paths). The intermediate arrays are no longer written on the AVX2 path.
+
+## Result
+
+| Stage | Before | After |
+|---|---:|---:|
+| serialise | 25.8ms (16.3%) | 2.8ms (1.8%) |
+| quantiser-search | 87.6ms (55.4%) | 108.6ms (70.5%) |
+| total (5 frames) | 158ms | 154ms (~-2.5%) |
+
+The packing compute moved from the serialiser into the quantiser-search
+(where the final quantiser trial emits the bits), so the net single-thread
+gain is modest (~2.5%). The intermediate memory traffic dropped ~3x (the
+18.7MB/frame codeword+wordlength arrays are replaced by ~6.2MB/frame of
+packed bits, which also fits in L3). The serialiser is now a trivial
+memcpy+headers stage. This is also the necessary precondition for fusing the
+packing directly into the quantise loop.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Haar0, DD9/7 and DD13/7 encoder streams byte-identical:
+  Haar0 `E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`,
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search (70%) now bundles the quantise, the VLC lookup, and the
+bit-packing; fusing the packing into the quantise loop (packing inline rather
+than via the scan-order scatter + separate pack pass) is the next lever. The
+L1+ forward horizontal levels (5.6%) remain the last un-vectorised transform.

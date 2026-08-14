@@ -32,6 +32,7 @@
 #include <string.h>
 #include "../vc2inversetransform_c/invtransform_c.hpp"
 #include "../vc2inversetransform_sse4_2/invtransform_sse4_2.hpp"
+#include "../vc2inversetransform_avx2/invtransform_avx2.hpp"
 #include "randomiser.hpp"
 #include "platform_variant.hpp"
 
@@ -146,6 +147,11 @@ invvtransformtest_data INVVTRANSFORMTEST_DATA[] = {
   { VC2DECODER_WFT_LEGALL_5_3, 0, 3, 4, true, false, false },
   { VC2DECODER_WFT_LEGALL_5_3, 1, 3, 4, true, false, false },
   { VC2DECODER_WFT_LEGALL_5_3, 2, 3, 4, true, false, false },
+  /* Deslauriers-Dubuc 9,7 and 13,7 (finest level = depth-level-1 == 0) */
+  { VC2DECODER_WFT_DESLAURIERS_DUBUC_9_7, 2, 3, 2, true, false, true },
+  { VC2DECODER_WFT_DESLAURIERS_DUBUC_9_7, 1, 2, 2, true, false, true },
+  { VC2DECODER_WFT_DESLAURIERS_DUBUC_13_7, 2, 3, 2, true, false, true },
+  { VC2DECODER_WFT_DESLAURIERS_DUBUC_13_7, 1, 2, 2, true, false, true },
 };
 const int INVVTRANSFORMTEST_DATA_NUM = sizeof(INVVTRANSFORMTEST_DATA)/sizeof(invvtransformtest_data);
 
@@ -398,6 +404,26 @@ int perform_invvtransformtest(invvtransformtest_data &data,
   if (HAS_SSE4_2 && data.SSE4_2) {
     printf("SSE4.2 [");
     InplaceTransform trans = get_invvtransform_sse4_2(data.wavelet, data.level, data.depth, data.sample_size);
+    if (trans == ctrans) {
+      printf("NONE]");
+    } else {
+      void *tdata = ALIGNED_ALLOC(32, height*stride*data.sample_size);
+      memcpy(tdata, idata_pre, height*stride*data.sample_size);
+      trans(tdata, stride, width, height);
+      if (memcmp(cdata, tdata, height*stride*data.sample_size)) {
+        printf("FAIL]\n");
+        r = 1;
+      } else {
+        printf(" OK ] ");
+      }
+      ALIGNED_FREE(tdata);
+    }
+  }
+
+  /* Test AVX2 version */
+  if (HAS_AVX2 && data.AVX2) {
+    printf("AVX2   [");
+    InplaceTransform trans = get_invvtransform_avx2(data.wavelet, data.level, data.depth, data.sample_size);
     if (trans == ctrans) {
       printf("NONE]");
     } else {

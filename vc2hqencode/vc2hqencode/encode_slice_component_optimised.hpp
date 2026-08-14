@@ -24,6 +24,9 @@
  *****************************************************************************/
 
 #include <stdint.h>
+#include <immintrin.h>
+#include "platform_variant.hpp"
+#include "bitpack.hpp"
 
 template<int w, int h, int d, class T> inline void encode_slice_component(CodedSlice<T> *slice, int c, QuantisationMatrices *matrices);
 
@@ -287,6 +290,116 @@ template<> inline void encode_slice_component<8,8,2, int16_t>(CodedSlice<int16_t
 }
 
 
+// Runtime AVX2 detection (cached; the encoder already calls
+// vc2_detect_cpu_features at init, but this header needs a local check).
+static inline bool encode_has_avx2() {
+#ifdef _MSC_VER
+  static const bool r = ([]() { int ci[4]; __cpuidex(ci, 7, 0); return (ci[1] & (1 << 5)) != 0; })();
+  return r;
+#else
+  static const bool r = __builtin_cpu_supports("avx2");
+  return r;
+#endif
+}
+
+// Scan-order positions (bitstream index) for each row-major sample of the
+// 32x8x3 slice, extracted from the hand-unrolled scalar specialization below.
+static const uint16_t SCAN_POS_32x8[256] = {
+  0,64,16,65,4,66,17,67,1,68,18,69,5,70,19,71,
+  2,72,20,73,6,74,21,75,3,76,22,77,7,78,23,79,
+  128,192,129,193,130,194,131,195,132,196,133,197,134,198,135,199,
+  136,200,137,201,138,202,139,203,140,204,141,205,142,206,143,207,
+  32,80,48,81,33,82,49,83,34,84,50,85,35,86,51,87,
+  36,88,52,89,37,90,53,91,38,92,54,93,39,94,55,95,
+  144,208,145,209,146,210,147,211,148,212,149,213,150,214,151,215,
+  152,216,153,217,154,218,155,219,156,220,157,221,158,222,159,223,
+  8,96,24,97,12,98,25,99,9,100,26,101,13,102,27,103,
+  10,104,28,105,14,106,29,107,11,108,30,109,15,110,31,111,
+  160,224,161,225,162,226,163,227,164,228,165,229,166,230,167,231,
+  168,232,169,233,170,234,171,235,172,236,173,237,174,238,175,239,
+  40,112,56,113,41,114,57,115,42,116,58,117,43,118,59,119,
+  44,120,60,121,45,122,61,123,46,124,62,125,47,126,63,127,
+  176,240,177,241,178,242,179,243,180,244,181,245,182,246,183,247,
+  184,248,185,249,186,250,187,251,188,252,189,253,190,254,191,255
+};
+
+// AVX2 quantize+encode of a full 32x8x3 slice component: 8 samples per
+// iteration with the quantisation (mulhi) and the merged codeword/length
+// table lookup (gather) vectorized. Codewords scatter into stack buffers (in
+// scan order), then pack directly into slice->packed[c] so the serialiser
+// memcpy's the bits instead of re-reading the codeword/wordlength arrays.
+static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice, int c,
+                                                       const uint16_t *m, const uint8_t *sh,
+                                                       uint8_t qshift) {
+  const int istride = slice->istride[c];
+  uint16_t cwbuf[256];
+  uint8_t  lnbuf[256];
+  int length = 0;
+  int samples = -1;
+  const __m256i ZERO256 = _mm256_setzero_si256();
+  const __m256i M255 = _mm256_set1_epi32(255);
+  const __m256i MFF = _mm256_set1_epi32(0xFF);
+  const __m256i QSHIFT = _mm256_set1_epi32(qshift);
+
+  for (int r = 0; r < 8; r++) {
+    const int16_t *in = &slice->idata[c][r * istride];
+    const uint16_t *mr = m + r * 32;
+    const uint8_t *shr = sh + r * 32;
+    const uint16_t *scanr = SCAN_POS_32x8 + r * 32;
+
+    for (int k = 0; k < 32; k += 8) {
+      const __m128i x = _mm_loadu_si128((const __m128i *)(in + k));
+      const __m128i ax = _mm_abs_epi16(x);
+      const __m128i mv = _mm_loadu_si128((const __m128i *)(mr + k));
+      const __m128i t = _mm_mulhi_epu16(ax, mv);          // (|x|*m)>>16
+      const __m128i t2 = _mm_add_epi16(t, ax);
+      __m256i d32 = _mm256_cvtepu16_epi32(t2);
+      d32 = _mm256_srlv_epi32(d32, _mm256_cvtepu8_epi32(_mm_loadl_epi64((const __m128i *)(shr + k))));
+      d32 = _mm256_srlv_epi32(d32, QSHIFT);
+      d32 = _mm256_min_epu32(d32, M255);
+      const __m256i cl = _mm256_i32gather_epi32((const int *)CLWLUT.v, d32, 4);
+
+      // codeword = (cl >> 16) | sign
+      const __m128i s = _mm_srli_epi16(_mm_srai_epi16(x, 15), 15); // 0 or 1
+      const __m256i s32 = _mm256_cvtepi16_epi32(s);
+      const __m256i cw32 = _mm256_or_si256(_mm256_srli_epi32(cl, 16), s32);
+      const __m128i cw = _mm_packus_epi32(_mm256_castsi256_si128(cw32), _mm256_extracti128_si256(cw32, 1));
+      // length = cl & 0xFF
+      const __m256i len32 = _mm256_and_si256(cl, MFF);
+      const __m128i len16 = _mm_packs_epi32(_mm256_castsi256_si128(len32), _mm256_extracti128_si256(len32, 1));
+      const __m128i len8 = _mm_packus_epi16(len16, len16);
+
+      uint16_t cw8[8]; uint8_t ln8[8];
+      _mm_storeu_si128((__m128i *)cw8, cw);
+      _mm_storel_epi64((__m128i *)ln8, len8);
+
+      // vectorized last-nonzero tracking: cand = (|x|>0) ? scan_pos : 0
+      const __m128i nv = _mm_loadu_si128((const __m128i *)scanr);
+      const __m128i xmask = _mm_cmpgt_epi16(ax, _mm_setzero_si128());
+      __m128i cand = _mm_and_si128(nv, xmask);
+      cand = _mm_max_epi16(cand, _mm_srli_si128(cand, 8));
+      cand = _mm_max_epi16(cand, _mm_srli_si128(cand, 4));
+      cand = _mm_max_epi16(cand, _mm_srli_si128(cand, 2));
+      const int cmax = (int)_mm_extract_epi16(cand, 0);
+      if (cmax > samples) samples = cmax;
+
+      for (int j = 0; j < 8; j++) {
+        const int n = scanr[j];
+        length += ln8[j];
+        cwbuf[n] = cw8[j];
+        lnbuf[n] = ln8[j];
+      }
+      scanr += 8;
+    }
+  }
+
+  length -= (255 - samples);
+  slice->length[c] = (length + 7) / 8;
+  slice->samples[c] = samples + 1;
+  bitpack_pack(slice->packed[c], cwbuf, lnbuf, samples + 1);
+  slice->packed_valid[c] = 1;
+}
+
 template<> inline void encode_slice_component<32,8,3, int16_t>(CodedSlice<int16_t> *slice, int c, QuantisationMatrices *matrices) {
   (void)matrices;
   const int w = 32;
@@ -302,6 +415,11 @@ template<> inline void encode_slice_component<32,8,3, int16_t>(CodedSlice<int16_
 
   const uint16_t *m = matrices->m(qindex,  c);
   const uint8_t *sh = matrices->sh(qindex, c);
+
+  if (encode_has_avx2()) {
+    encode_slice_component_32x8x3_avx2(slice, c, m, sh, qshift);
+    return;
+  }
 
   length += encode_sample<int16_t>(&slice->idata[c][ 0*istride +  0], &slice->codewords[c][  0], &slice->wordlengths[c][  0],   0, m[  0], sh[  0], qshift, samples);
   length += encode_sample<int16_t>(&slice->idata[c][ 0*istride +  1], &slice->codewords[c][ 64], &slice->wordlengths[c][ 64],  64, m[  1], sh[  1], qshift, samples);

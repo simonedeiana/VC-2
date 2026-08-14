@@ -27,6 +27,7 @@
 
 #include "../vc2inversetransform_c/invtransform_c.hpp"
 #include "../vc2inversetransform_sse4_2/invtransform_sse4_2.hpp"
+#include "../vc2inversetransform_avx2/invtransform_avx2.hpp"
 
 #include "../vc2inversetransform_c/dequantise_c.hpp"
 #include "../vc2inversetransform_sse4_2/dequantise_sse4_2.hpp"
@@ -141,6 +142,15 @@ void detect_cpu_features() {
 
     getDequantiseFunction = getDequantiseFunction_sse4_2;
     get_slice_decoder = get_slice_decoder_sse4_2;
+  }
+#endif
+
+#ifndef NO_AVX2
+  if (HAS_AVX2) {
+    // AVX2 inverse-vertical and final-horizontal kernels (DD9/7, DD13/7)
+    // take precedence; everything else falls back to the SSE4.2 dispatch.
+    get_invvtransform = get_invvtransform_avx2;
+    get_invhtransformfinal = get_invhtransformfinal_avx2;
   }
 #endif
 }

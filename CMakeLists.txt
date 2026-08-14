@@ -106,6 +106,8 @@ add_library(vc2transform_avx STATIC
   "${encode_generated}/avx/legall_transform_sse4_2.hpp")
 add_library(vc2transform_avx2 STATIC
   ${encode_root}/vc2transform_avx2/transform_avx2.cpp
+  ${encode_root}/vc2transform_avx2/deslauriers_dubuc_9_7_transform.cpp
+  ${encode_root}/vc2transform_avx2/deslauriers_dubuc_13_7_transform.cpp
   "${encode_generated}/avx2/haar_transform_sse4_2.hpp"
   "${encode_generated}/avx2/legall_transform_sse4_2.hpp")
 foreach(target vc2transform_c vc2transform_sse vc2transform_avx vc2transform_avx2)
@@ -163,9 +165,15 @@ add_library(vc2invtransform_sse STATIC
   ${decode_root}/vc2inversetransform_sse4_2/invtransform_sse4_2.cpp
   ${decode_root}/vc2inversetransform_sse4_2/dequantise_sse4_2.cpp
   ${decode_root}/vc2inversetransform_sse4_2/vlc_sse4_2.cpp)
-foreach(target vc2invtransform_c vc2invtransform_sse)
+add_library(vc2invtransform_avx2 STATIC
+  ${decode_root}/vc2inversetransform_avx2/invtransform_avx2.cpp
+  ${decode_root}/vc2inversetransform_avx2/deslauriers_dubuc_9_7_invtransform.cpp
+  ${decode_root}/vc2inversetransform_avx2/deslauriers_dubuc_13_7_invtransform.cpp)
+foreach(target vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
   target_include_directories(${target} PUBLIC ${decode_root} PRIVATE ${decode_root}/vc2hqdecode)
 endforeach()
+target_compile_options(vc2invtransform_avx2 PRIVATE /arch:AVX2)
+target_link_libraries(vc2invtransform_avx2 PUBLIC vc2invtransform_sse)
 
 if(VC2_ENABLE_CUDA)
   add_library(vc2invtransform_cuda STATIC
@@ -187,7 +195,7 @@ add_library(vc2hqdecode SHARED
   ${decode_root}/vc2hqdecode/stream.cpp)
 target_compile_definitions(vc2hqdecode PRIVATE VC2HQDECODE_DLL ASIO_STANDALONE)
 target_include_directories(vc2hqdecode PUBLIC ${decode_root} PRIVATE ${decode_root}/redist)
-target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_c vc2invtransform_sse)
+target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
 if(VC2_ENABLE_CUDA)
   target_compile_definitions(vc2hqdecode PRIVATE VC2_ENABLE_CUDA=1)
   target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_cuda)
@@ -228,7 +236,7 @@ if(BUILD_TESTING)
   target_compile_definitions(vc2decodertest PRIVATE VC2HQDECODE_DLL)
   target_include_directories(vc2decodertest PRIVATE
     ${decode_root} ${decode_root}/vc2hqdecode ${decode_root}/redist)
-  target_link_libraries(vc2decodertest PRIVATE vc2invtransform_c vc2invtransform_sse)
+  target_link_libraries(vc2decodertest PRIVATE vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
   add_test(NAME vc2decodertest COMMAND vc2decodertest)
 endif()
 
