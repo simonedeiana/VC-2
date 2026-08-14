@@ -282,3 +282,112 @@ in one interleaved loop.
 - Six of six native CTest targets passed; conformance validator clean.
 - Encoder untouched (still `4e45ed1c...` at the same config).
 
+---
+
+# Round 4 — single-thread pointer-alias refinement
+
+Date: 2026-08-13
+
+## Result
+
+The retained change adds `__restrict` qualifiers to the input and output
+buffers of the inlined `vlc_step_ex` SSE4.2 decoder step. This gives MSVC
+permission to assume that the compressed-byte input and coefficient output do
+not alias while it schedules the LUT/state chain and SIMD stores.
+
+In the fixed 1920x1080, Haar0, 30-frame, one-worker benchmark, the decoder
+measured 68.962 fps over 15 runs with the change. The no-change comparison
+measured 67.874 fps over 9 runs. The samples are from separate runs, so this
+is recorded as a small observed improvement rather than a strict alternating
+A/B claim. The encoder annotation trial was removed because it did not produce
+a stable gain.
+
+The final stage profile remains VLC-dominated:
+
+| Stage | Worker time |
+|---|---:|
+| vlc-decode | 60.38% |
+| dequantise | 12.60% |
+| inverse-vertical | 6.62% |
+| inverse-horizontal | 4.57% |
+| final-horizontal+output | 15.83% |
+
+## Verification
+
+- Six of six native CTest targets passed after the final build.
+- A fresh one-frame stream passed the installed VC-2 bitstream validator with
+  `No errors found in bitstream`.
+- The encoder stream remained byte-identical to the pre-change stream
+  (`D5DD1542CAC95E70AC273321B6CE685C76EEC9B0F5F6904B1DD40794B1D08709`).
+
+---
+
+# Round 5 — DD9/7 and DD13/7 transform SIMD
+
+Date: 2026-08-13
+
+## Coverage
+
+The supported encoder wavelets were swept at one worker on the fixed
+1920x1080, 10-bit 4:2:2, Haar0-style 30-frame workload. Fidelity is exposed
+by the command-line help but is rejected by the current encoder dispatch as an
+invalid wavelet, so it has no valid encoder benchmark. The scalar DD9/7 and
+DD13/7 inverse paths were the clear transform-specific bottleneck.
+
+Their initial stage profiles put inverse vertical lifting at 43.01% and
+43.27% of decoder worker time respectively. The existing implementation was
+scalar C++ for these filters, unlike the already-vectorized Haar and LeGall
+paths.
+
+## Retained change
+
+- Added SSE4.2 four-column kernels for the finest-level DD9/7 and DD13/7
+  inverse vertical transforms. Each SIMD lane is an independent image column;
+  the scalar lifting recurrence is preserved within each lane.
+- Kept the existing scalar implementation as the fallback for short or
+  non-four-column geometries.
+- Left final horizontal/output scalar. A row-interleaved DD9 trial was
+  byte-identical but regressed the decoder from 38.3 fps to 35.6 fps because
+  its strided row loads and stores outweighed the vector arithmetic.
+
+The corresponding DD13/7 encoder vertical-kernel trial was rejected. Nine
+alternating runs measured 19.019 fps for the scalar dispatch and 18.642 fps
+for the SIMD dispatch, a 1.98% regression. The trial stream was nevertheless
+byte-identical to the scalar stream, so no encoder dispatch change was kept.
+
+## Same-session A/B results
+
+Nine alternating 30-frame runs, scalar dispatch versus SIMD dispatch:
+
+| Transform | Scalar | SIMD | Improvement |
+|---|---:|---:|---:|
+| DD9/7 decoder | 27.985 fps | 33.861 fps | **+21.00%** |
+| DD13/7 decoder | 24.834 fps | 29.970 fps | **+20.68%** |
+
+The final profile still shows final horizontal/output as the next major
+transform cost (about 34–35%), followed by inverse vertical at about 29–30%.
+
+## Verification
+
+- Six of six native CTest targets passed after the retained kernels were
+  restored.
+- Scalar and SIMD DD9/7 decoder output hashes matched:
+  `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`.
+- Scalar and SIMD DD13/7 decoder output hashes matched:
+  `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Fresh DD9/7 and DD13/7 one-frame streams were accepted by the installed
+  validator; no bitstream errors were reported.
+
+## Research follow-up
+
+The implementation follows the established vertical-lane strategy described
+in SIMD lifting literature: vectorize independent columns while keeping the
+lifting dependency chain within each lane. The 2-D lifting literature also
+emphasizes cache-aware treatment of vertical versus horizontal filtering; that
+matches the current profile, where horizontal output is now the limiting
+stage. See [Vectorization of the 2D Wavelet Lifting Transform Using SIMD
+Extensions](https://www.researchgate.net/publication/220951124_Vectorization_of_the_2D_Wavelet_Lifting_Transform_Using_SIMD_Extensions),
+[A Single-Loop Approach to SIMD Parallelization of 2-D Wavelet
+Lifting](https://www.researchgate.net/publication/221392398_A_Single-Loop_Approach_to_SIMD_Parallelization_of_2-D_Wavelet_Lifting),
+and the [JPEG 2000 lifting-transform specification](https://www.itu.int/epublications/publication/itu-t-t-801-v3-2023-08-08-jpeg-2000-image-coding-system-extensions).
+

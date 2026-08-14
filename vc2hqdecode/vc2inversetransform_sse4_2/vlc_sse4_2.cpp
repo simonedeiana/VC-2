@@ -136,7 +136,8 @@ inline int decode_sse4_2(uint8_t *idata, int ilength, int32_t *odata, int olengt
 // compiler keeps it in registers. Two independent streams are decoded in a
 // single interleaved loop so their serial LUT-latency chains overlap (the VLC
 // stage is chain-latency bound: ~76% of the loop is the chain + control).
-static inline void vlc_step_ex(uint8_t *idata, int ilength, int32_t *odata, int olength,
+static inline void vlc_step_ex(uint8_t *__restrict idata, int ilength,
+                               int32_t *__restrict odata, int olength,
                                int &icounter, int &ocounter, int32_t &V,
                                const LUTEntry *&next, const __m128i ZERO) {
   (void)ilength;
