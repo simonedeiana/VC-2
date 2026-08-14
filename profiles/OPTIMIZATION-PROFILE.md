@@ -612,3 +612,69 @@ that defeated earlier attempts; it generalizes to any separable lifting
 stencil. The next largest targets are VLC decode (now the top DD9/7 stage at
 ~32%, and ~62% for Haar0) and the still-scalar coarser-level inverse vertical
 transforms.
+
+---
+
+# Round 9 — AVX2 vectorized quantize + VLC lookup in the encoder
+
+Date: 2026-08-14
+
+## Coverage
+
+The encoder was dominated by the quantiser-search stage (73.46% of worker
+time), which for EIGHTHSEARCH is the full quantize+VLC of each slice
+(`encode_slice_component<32,8,3,int16_t>` emits codewords during the search's
+final size trial and reuses them, so the search is the encode). The per-sample
+`encode_sample` does a reciprocal-multiply quantisation, a merged
+codeword/length table lookup (`CLWLUT`), two scattered stores (codeword and
+wordlength, in bitstream scan order), and a last-non-zero tracking branch.
+
+## Retained change
+
+- **AVX2 vectorization of the quantisation and CLWLUT lookup** in a new
+  `encode_slice_component_32x8x3_avx2` path, selected at runtime when AVX2 is
+  present, with the existing hand-unrolled scalar specialization as the
+  fallback. Eight samples per iteration: `abs`, `mulhi` (16x16->32 high half,
+  replacing the scalar reciprocal division), variable shifts (`srlv`), and an
+  AVX2 gather over `CLWLUT` produce the codeword and length vectors. The
+  codeword/wordlength stores stay scalar because the bitstream scan order
+  scatters them; the last-non-zero tracking is done branchlessly with a
+  horizontal max over the scan positions.
+- Added a cached runtime AVX2 check (`encode_has_avx2`, CPUID leaf 7) local
+  to the header.
+- The scan-order permutation table was extracted programmatically from the
+  hand-unrolled scalar specialization.
+
+## Same-session A/B results
+
+Pinned microbenchmark of the quantize+lookup kernel (8 samples/iter):
+
+| Kernel | Scalar | AVX2 |
+|---|---:|---:|
+| quantize+lookup | 2.19 ns/sample | 0.61 ns/sample |
+
+Full encoder (eleven pinned runs, median, 60 frames):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| Encoder (Haar0) | 35.147 fps | 40.789 fps | **+16.1%** |
+
+The quantiser-search stage dropped from 73.46% to 69.79% of encoder worker
+time; serialise is now the second-largest stage (18.61%).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Encoder stream byte-identical: the AVX2 and forced-scalar builds produced
+  the same 1-frame stream SHA-256
+  (`E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`).
+- Round-trip verified: the AVX2-encoded stream decodes successfully.
+
+## Research follow-up
+
+The remaining encoder cost is the scattered codeword/wordlength stores (scan
+order) and the serialise bit-packer (18.61%). A future step could fuse the
+bit-packing into the encode to eliminate the intermediate arrays and the
+separate serialise pass, or reorder the coefficient storage so the scan order
+is contiguous. The vectorized-gather pattern (mulhi + srlv + i32gather) is the
+same one that made the decoder VLC lookup fast.
