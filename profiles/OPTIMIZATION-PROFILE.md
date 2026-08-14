@@ -919,3 +919,48 @@ remaining lever is fusing quantise+encode with the serialiser so the final
 quantiser trial packs bits directly into the output buffer, eliminating the
 intermediate codeword/wordlength arrays (and their write+read traffic). The
 L1+ forward horizontal levels (5.6%) are the last un-vectorised transform.
+
+---
+
+# Round 14 — fuse quantise+encode with the serialiser
+
+## Change
+
+The serialiser no longer re-reads the `codeword`/`wordlength` arrays. The
+AVX2 quantise path scatters codewords into stack buffers and packs them
+directly into a new per-slice `packed[c]` buffer (via the shared SIMD
+bit-packer from Round 13, now in `bitpack.hpp`), setting a `packed_valid[c]`
+flag. The serialiser memcpy's `packed[c]` (`length[c]` bytes) when the flag is
+set, and falls back to packing the arrays otherwise (non-AVX2 or non-32x8x3
+paths). The intermediate arrays are no longer written on the AVX2 path.
+
+## Result
+
+| Stage | Before | After |
+|---|---:|---:|
+| serialise | 25.8ms (16.3%) | 2.8ms (1.8%) |
+| quantiser-search | 87.6ms (55.4%) | 108.6ms (70.5%) |
+| total (5 frames) | 158ms | 154ms (~-2.5%) |
+
+The packing compute moved from the serialiser into the quantiser-search
+(where the final quantiser trial emits the bits), so the net single-thread
+gain is modest (~2.5%). The intermediate memory traffic dropped ~3x (the
+18.7MB/frame codeword+wordlength arrays are replaced by ~6.2MB/frame of
+packed bits, which also fits in L3). The serialiser is now a trivial
+memcpy+headers stage. This is also the necessary precondition for fusing the
+packing directly into the quantise loop.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Haar0, DD9/7 and DD13/7 encoder streams byte-identical:
+  Haar0 `E27A23277771A6E294F91042C1011B24EFFA1EA044AA6CD62F0827CB04E46744`,
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search (70%) now bundles the quantise, the VLC lookup, and the
+bit-packing; fusing the packing into the quantise loop (packing inline rather
+than via the scan-order scatter + separate pack pass) is the next lever. The
+L1+ forward horizontal levels (5.6%) remain the last un-vectorised transform.
