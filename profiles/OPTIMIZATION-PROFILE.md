@@ -394,7 +394,7 @@ and the [JPEG 2000 lifting-transform specification](https://www.itu.int/epublica
 
 ---
 
-# Round 6 — DD9/7 and DD13/7 final horizontal SIMD (rejected)
+# Round 6 ï¿½ DD9/7 and DD13/7 final horizontal SIMD (rejected)
 
 Date: 2026-08-13
 
@@ -467,7 +467,7 @@ final-H arithmetic.
 
 ---
 
-# Round 7 — DD9/7 and DD13/7 AVX2 inverse vertical
+# Round 7 ï¿½ DD9/7 and DD13/7 AVX2 inverse vertical
 
 Date: 2026-08-13
 
@@ -537,7 +537,7 @@ the coarser-level inverse vertical transforms (still scalar int16).
 
 ---
 
-# Round 8 — Parallel DD9/7 and DD13/7 final horizontal + streaming stores
+# Round 8 ï¿½ Parallel DD9/7 and DD13/7 final horizontal + streaming stores
 
 Date: 2026-08-14
 
@@ -615,7 +615,7 @@ transforms.
 
 ---
 
-# Round 9 — AVX2 vectorized quantize + VLC lookup in the encoder
+# Round 9 ï¿½ AVX2 vectorized quantize + VLC lookup in the encoder
 
 Date: 2026-08-14
 
@@ -681,7 +681,7 @@ same one that made the decoder VLC lookup fast.
 
 ---
 
-# Round 10 — AVX2 DD9/7 and DD13/7 forward vertical transforms (encoder)
+# Round 10 ï¿½ AVX2 DD9/7 and DD13/7 forward vertical transforms (encoder)
 
 Date: 2026-08-14
 
@@ -733,3 +733,67 @@ and horizontal-wavelet-L1+ at 5.31%) remain scalar and are the next
 transform target, followed by the coarser-level forward vertical levels
 (skip 2/4/8). The serialise bit-packer (13.15%) is the remaining
 non-transform cost.
+
+---
+
+# Round 11 â€” encoder DD forward HORIZONTAL input transform (AVX2)
+
+## Analysis
+
+After the forward vertical kernels (Round 10), the DD9/7 encoder's remaining
+transform cost was dominated by `input+horizontal-L0` (18.22%) â€” the initial
+horizontal lifting applied to the raw 10P2 input row before the vertical
+wavelet. That stage is the `Deslauriers_Dubuc_*_transform_H_inplace_10P2`
+template, a serial lifting recurrence along each row.
+
+The scalar recurrence is a parallel column stencil, so the same two-pass
+approach used for the decoder's inverse final-H applies here:
+
+1. de-interleave the uint16 row into even/odd int32 scratch, converting each
+   sample with `(v-512)<<1`;
+2. compute the odd outputs `O[j] = odd - update(even[j-1..j+2])` from compact
+   even reads (sliding `alignr` windows);
+3. compute the even outputs `E[j] = even + predict(O[j-1..O[j+1])`,
+   interleave E/O and store as int16.
+
+DD9/7 uses a 2-tap predict `(a+b+2)>>2`; DD13/7 uses the 5-tap
+`(-a+9b+9c-d+16)>>5`. The mirror boundary pads (traced from the scalar
+prologue/tail) are filled into the scratch arrays before passes 2 and 3, so
+the inner loops have no branches.
+
+## Retained change
+
+- Added `Deslauriers_Dubuc_9_7_transform_H_inplace_10P2_avx2` and
+  `Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2` in the encoder's
+  `vc2transform_avx2` library, wired into `get_htransforminitial_avx2` for
+  the 10P2/int16 dispatch. Short (<16), non-multiple-of-8, or short-height
+  geometries fall back to the scalar template. The overlap mirror-fill and
+  bottom-row copy stay scalar (identical to the reference).
+
+## Same-session A/B results
+
+Pinned 60-frame medians, before vs after (both builds already include the
+Round 10 forward vertical kernels):
+
+| Workload | Before (V only) | After (V+H) | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 30.69 fps | 31.84 fps | **+3.7%** |
+| DD13/7 encoder | 28.14 fps | 29.93 fps | **+6.4%** |
+
+The DD9/7 input+horizontal-L0 stage dropped from 18.22% to 12.80% of encoder
+worker time. Cumulative encoder gains (scalar baseline -> now): DD9/7
+25.63 -> 31.84 fps (**+24.2%**), DD13/7 23.23 -> 29.93 fps (**+28.8%**).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  scalar dispatches:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+Remaining encoder targets: the coarser forward vertical levels (skip 2/4/8),
+the L1+ forward horizontal levels (5.01%), and the serialise bit-packer
+(14.54%). The quantiser-search stage (54.20%) now dominates the DD encoder.
