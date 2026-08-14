@@ -132,3 +132,120 @@ void Deslauriers_Dubuc_9_7_transform_V_inplace_avx2(void *_idata,
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// DD 9/7 forward HORIZONTAL input transform (10P2 -> int16), AVX2.
+// The scalar recurrence along x is a parallel column stencil, so a two-pass
+// scheme (mirroring the decoder's inverse final-H) breaks the serial chain:
+//   pass 1 de-interleaves the uint16 row into even/odd and converts each
+//          sample to int32 (v-512)<<1;
+//   pass 2 computes the odd outputs O[j] = odd - update(even[j-1..j+2]) from
+//          compact even reads;
+//   pass 3 computes the even outputs E[j] = even + predict(O[j-1],O[j]),
+//          interleaves E/O and stores int16.
+// Boundary mirrors: even[-1]=even[-2]=even[0]; even[nE]=even[nE-1],
+// even[nE+1]=even[nE-2]; O[-1]=O[0]. The overlap mirror-fill and the
+// bottom-row copy stay scalar (identical to the reference).
+
+static inline __m128i dd9h_update4(__m128i a, __m128i b, __m128i c, __m128i d) {
+  __m128i nb = _mm_add_epi32(b, _mm_slli_epi32(b, 3));
+  __m128i nc = _mm_add_epi32(c, _mm_slli_epi32(c, 3));
+  __m128i v = _mm_sub_epi32(_mm_setzero_si128(), a);
+  v = _mm_add_epi32(v, nb);
+  v = _mm_add_epi32(v, nc);
+  v = _mm_sub_epi32(v, d);
+  return _mm_srai_epi32(_mm_add_epi32(v, _mm_set1_epi32(8)), 4);
+}
+
+static inline __m128i dd9h_predict2(__m128i a, __m128i b) {
+  return _mm_srai_epi32(_mm_add_epi32(_mm_add_epi32(a, b), _mm_set1_epi32(2)), 2);
+}
+
+void Deslauriers_Dubuc_9_7_transform_H_inplace_10P2_avx2(const char *_idata,
+                                                         const int istride,
+                                                         void **_odata,
+                                                         const int ostride,
+                                                         const int iwidth,
+                                                         const int iheight,
+                                                         const int owidth,
+                                                         const int oheight) {
+  if (iwidth < 16 || (iwidth & 7) != 0 || iheight < 8) {
+    Deslauriers_Dubuc_9_7_transform_H_inplace_10P2<int16_t>(
+      _idata, istride, _odata, ostride, iwidth, iheight, owidth, oheight);
+    return;
+  }
+
+  const uint16_t *idata = (const uint16_t *)_idata;
+  int16_t *odata = *(int16_t **)_odata;
+  const int nE = iwidth / 2;
+
+  int32_t *even32 = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+  int32_t *odd32  = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+  int32_t *Oscr   = (int32_t *)_alloca((nE + 2) * sizeof(int32_t));
+  int32_t *e = even32 + 2;  // real even at e[0..nE-1]
+  int32_t *o = odd32 + 2;   // real odd  at o[0..nE-1]
+  int32_t *Op = Oscr + 1;   // real O    at Op[0..nE-1]
+
+  const __m128i EVEN = _mm_setr_epi8(0,1, 4,5, 8,9, 12,13, -1,-1,-1,-1,-1,-1,-1,-1);
+  const __m128i ODD  = _mm_setr_epi8(2,3, 6,7, 10,11, 14,15, -1,-1,-1,-1,-1,-1,-1,-1);
+  const __m128i LO16 = _mm_setr_epi8(0,1, 4,5, 8,9, 12,13, -1,-1,-1,-1,-1,-1,-1,-1);
+  const __m128i M512 = _mm_set1_epi32(512);
+
+  for (int y = 0; y < iheight; y++) {
+    const uint16_t *row = idata + (size_t)y * istride;
+    int16_t *orow = odata + (size_t)y * ostride;
+
+    // pass 1: de-interleave + convert (v-512)<<1
+    for (int j = 0; j + 4 <= nE; j += 4) {
+      __m128i s = _mm_loadu_si128((const __m128i *)(row + 2 * j));
+      __m128i e32 = _mm_cvtepu16_epi32(_mm_shuffle_epi8(s, EVEN));
+      __m128i o32 = _mm_cvtepu16_epi32(_mm_shuffle_epi8(s, ODD));
+      e32 = _mm_slli_epi32(_mm_sub_epi32(e32, M512), 1);
+      o32 = _mm_slli_epi32(_mm_sub_epi32(o32, M512), 1);
+      _mm_storeu_si128((__m128i *)(e + j), e32);
+      _mm_storeu_si128((__m128i *)(o + j), o32);
+    }
+    // boundary pads (mirrors)
+    e[-1] = e[0];
+    e[-2] = e[0];
+    e[nE] = e[nE - 1];
+    e[nE + 1] = e[nE - 2];
+
+    // pass 2: O[j] = odd[j] - update(even[j-1..j+2])
+    for (int j0 = 0; j0 + 4 <= nE; j0 += 4) {
+      __m128i d_lo = _mm_loadu_si128((const __m128i *)(e + j0 - 2));
+      __m128i d_hi = _mm_loadu_si128((const __m128i *)(e + j0 + 2));
+      __m128i S1 = _mm_alignr_epi8(d_hi, d_lo, 4);
+      __m128i S2 = _mm_alignr_epi8(d_hi, d_lo, 8);
+      __m128i S3 = _mm_alignr_epi8(d_hi, d_lo, 12);
+      __m128i odd = _mm_loadu_si128((const __m128i *)(o + j0));
+      __m128i O4 = _mm_sub_epi32(odd, dd9h_update4(S1, S2, S3, d_hi));
+      _mm_storeu_si128((__m128i *)(Op + j0), O4);
+    }
+    Op[-1] = Op[0];
+
+    // pass 3: E[j] = even[j] + predict(O[j-1],O[j]); interleave; store int16
+    for (int j0 = 0; j0 + 4 <= nE; j0 += 4) {
+      __m128i e4 = _mm_loadu_si128((const __m128i *)(e + j0));
+      __m128i o_prev = _mm_loadu_si128((const __m128i *)(Op + j0 - 1));
+      __m128i o_cur = _mm_loadu_si128((const __m128i *)(Op + j0));
+      __m128i E4 = _mm_add_epi32(e4, dd9h_predict2(o_prev, o_cur));
+      __m128i OUT_lo = _mm_unpacklo_epi32(E4, o_cur);
+      __m128i OUT_hi = _mm_unpackhi_epi32(E4, o_cur);
+      __m128i out16 = _mm_unpacklo_epi64(_mm_shuffle_epi8(OUT_lo, LO16),
+                                         _mm_shuffle_epi8(OUT_hi, LO16));
+      _mm_storeu_si128((__m128i *)(orow + 2 * j0), out16);
+    }
+  }
+
+  // overlap mirror-fill (identical to the scalar reference)
+  for (int y = 0; y < iheight; y++) {
+    for (int x = iwidth; x < owidth; x += 2) {
+      odata[y * ostride + x + 0] = odata[y * ostride + (2 * iwidth - x - 2) + 0];
+      odata[y * ostride + x + 1] = odata[y * ostride + (2 * iwidth - x - 2) + 1];
+    }
+  }
+  for (int y = iheight; y < oheight; y++) {
+    memcpy(&odata[y * ostride], &odata[(2 * iheight - y - 1) * ostride], owidth);
+  }
+}
