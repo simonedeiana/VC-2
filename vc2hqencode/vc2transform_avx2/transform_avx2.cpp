@@ -31,6 +31,9 @@
 #include "transform_avx2.hpp"
 #include "transform_kernels.hpp"
 
+void Deslauriers_Dubuc_9_7_transform_V_inplace_avx2(void *, const int, const int, const int, const int);
+void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2(void *, const int, const int, const int, const int);
+
 InplaceTransformInitial get_htransforminitial_avx2(int wavelet_index, int active_bits, int coef_size, int c, VC2EncoderInputFormat fmt) {
   (void) c;
   if (fmt == VC2ENCODER_INPUT_10P2) {
@@ -103,6 +106,14 @@ InplaceTransform get_htransform_avx2(int wavelet_index, int level, int coef_size
 InplaceTransform get_vtransform_avx2(int wavelet_index, int level, int coef_size, VC2EncoderInputFormat fmt) {
   if (coef_size == 2) {
     switch (wavelet_index) {
+    case VC2ENCODER_WFT_DESLAURIERS_DUBUC_9_7:
+      if (level == 0)
+        return Deslauriers_Dubuc_9_7_transform_V_inplace_avx2;
+      break;
+    case VC2ENCODER_WFT_DESLAURIERS_DUBUC_13_7:
+      if (level == 0)
+        return Deslauriers_Dubuc_13_7_transform_V_inplace_avx2;
+      break;
     case VC2ENCODER_WFT_LEGALL_5_3:
       switch (level) {
       case 0:

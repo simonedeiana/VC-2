@@ -106,6 +106,8 @@ add_library(vc2transform_avx STATIC
   "${encode_generated}/avx/legall_transform_sse4_2.hpp")
 add_library(vc2transform_avx2 STATIC
   ${encode_root}/vc2transform_avx2/transform_avx2.cpp
+  ${encode_root}/vc2transform_avx2/deslauriers_dubuc_9_7_transform.cpp
+  ${encode_root}/vc2transform_avx2/deslauriers_dubuc_13_7_transform.cpp
   "${encode_generated}/avx2/haar_transform_sse4_2.hpp"
   "${encode_generated}/avx2/legall_transform_sse4_2.hpp")
 foreach(target vc2transform_c vc2transform_sse vc2transform_avx vc2transform_avx2)

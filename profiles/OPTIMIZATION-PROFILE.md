@@ -678,3 +678,58 @@ bit-packing into the encode to eliminate the intermediate arrays and the
 separate serialise pass, or reorder the coefficient storage so the scan order
 is contiguous. The vectorized-gather pattern (mulhi + srlv + i32gather) is the
 same one that made the decoder VLC lookup fast.
+
+---
+
+# Round 10 — AVX2 DD9/7 and DD13/7 forward vertical transforms (encoder)
+
+Date: 2026-08-14
+
+## Coverage
+
+For Deslauriers-Dubuc content the encoder's vertical-wavelet stage was the
+largest transform cost (32.37% of DD9/7 worker time) and was entirely scalar:
+the encoder's AVX2 dispatch covered Haar and LeGall only. The DD forward
+vertical lifting is the same per-column recurrence as the inverse (predict
+`(a+b+2)>>2`, update `(-a+9b+9c-d+8)>>4`, plus the 13/7 five-tap predict),
+just applied in the forward order, so the same 8-column SIMD strategy that
+accelerated the decoder's inverse vertical applies.
+
+## Retained change
+
+- Added AVX2 eight-column forward vertical kernels for DD9/7 and DD13/7 in
+  the encoder's `vc2transform_avx2` library (level 0 / skip 1, int16 -> int32
+  widening, one SIMD lane per image column). The scalar lifting recurrence is
+  preserved within each lane; the prologue/main/tail structure mirrors the
+  scalar reference exactly. Short, unaligned, or coarser-level geometries
+  fall back to the scalar template.
+- Wired the two kernels into `get_vtransform_avx2` (runtime AVX2 dispatch,
+  which the encoder already selects when AVX2 is present).
+
+## Same-session A/B results
+
+Pinned 60-frame medians, scalar dispatch vs AVX2 dispatch:
+
+| Workload | Scalar | AVX2 | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 25.63 fps | 30.69 fps | **+19.7%** |
+| DD13/7 encoder | 23.23 fps | 28.14 fps | **+21.1%** |
+
+The DD9/7 vertical-wavelet stage dropped from 32.37% to 14.31% of encoder
+worker time. The Haar0 encoder is unaffected (41.24 fps).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  forced-scalar builds:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The encoder's DD forward horizontal transforms (input+horizontal-L0 at 18.22%
+and horizontal-wavelet-L1+ at 5.31%) remain scalar and are the next
+transform target, followed by the coarser-level forward vertical levels
+(skip 2/4/8). The serialise bit-packer (13.15%) is the remaining
+non-transform cost.
