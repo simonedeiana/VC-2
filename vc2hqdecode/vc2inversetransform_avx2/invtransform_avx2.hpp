@@ -5,5 +5,6 @@
 #include "invtransform.hpp"
 
 VC2EXPORT InplaceTransform get_invvtransform_avx2(int wavelet_index, int level, int depth, int sample_size);
+VC2EXPORT InplaceTransformFinal get_invhtransformfinal_avx2(int wavelet_index, int active_bits, int sample_size);
 
 #endif /* __INVTRANSFORM_AVX2_HPP__ */

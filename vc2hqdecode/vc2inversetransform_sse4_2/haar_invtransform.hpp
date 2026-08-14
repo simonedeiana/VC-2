@@ -237,6 +237,11 @@ template<int shift, int active_bits> void Haar_invtransform_H_final_1_sse4_2_int
   const __m128i CLIP = _mm_set1_epi16((1 << active_bits) - 1);
   const __m128i ZERO = _mm_set1_epi16(0);
 
+  // The output plane is written once and never re-read by the decoder, so
+  // non-temporal stores avoid the read-for-ownership traffic of a normal
+  // write-allocate store. Only safe when every 16-byte store is aligned.
+  const bool use_stream = (((uintptr_t)odata & 15) == 0) && ((ostride & 7) == 0) && ((ooffset_x & 7) == 0);
+
   (void)iwidth;
   (void)iheight;
 
@@ -273,8 +278,15 @@ template<int shift, int active_bits> void Haar_invtransform_H_final_1_sse4_2_int
       Z0 = _mm_max_epi16(Z0, ZERO);
       Z8 = _mm_max_epi16(Z8, ZERO);
 
-      _mm_store_si128((__m128i *)&odata[2*((y - ooffset_y)*ostride + x + 0 - ooffset_x)], Z0);
-      _mm_store_si128((__m128i *)&odata[2*((y - ooffset_y)*ostride + x + 8 - ooffset_x)], Z8);
+      __m128i *d0 = (__m128i *)&odata[2*((y - ooffset_y)*ostride + x + 0 - ooffset_x)];
+      __m128i *d8 = (__m128i *)&odata[2*((y - ooffset_y)*ostride + x + 8 - ooffset_x)];
+      if (use_stream) {
+        _mm_stream_si128(d0, Z0);
+        _mm_stream_si128(d8, Z8);
+      } else {
+        _mm_store_si128(d0, Z0);
+        _mm_store_si128(d8, Z8);
+      }
     }
   }
 }

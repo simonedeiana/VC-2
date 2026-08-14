@@ -534,3 +534,81 @@ the measured 1.9-2x kernel speedup confirms the vertical lifting recurrence
 is compute-bound rather than port-bound at 8 lanes. The natural next targets
 are the remaining compute-heavy stages: VLC decode (24% DD9/7, 61% Haar0) and
 the coarser-level inverse vertical transforms (still scalar int16).
+
+---
+
+# Round 8 — Parallel DD9/7 and DD13/7 final horizontal + streaming stores
+
+Date: 2026-08-14
+
+## Coverage
+
+Round 6 had rejected SIMD for the Deslauriers-Dubuc final horizontal stage
+because the shuffle-heavy SSE4.2 attempt was slower than scalar, and the stage
+appeared memory-bound. Re-investigating with the same benchmark/profile/optimize
+cycle on the `bold-experiments` branch showed the stage was actually
+compute-bound on the serial lifting recurrence (7.69 ms/frame cached, vs a
+0.31 ms store floor), and that the earlier failure was the per-operand shuffle
+extraction, not the idea of parallelizing.
+
+## Retained changes
+
+- **AVX2 two-pass DD9/7 and DD13/7 final horizontal kernels.** The scalar
+  recurrence is a parallel column stencil. A two-pass-per-row scheme breaks
+  the serial dependency without shuffle extraction:
+  - pass 1 de-interleaves 8 int16 samples into even/odd, widens to int32,
+    computes the compact even D vector, and stores it to a small stack
+    scratch buffer (thread-safe, L1-resident);
+  - pass 2 reads D contiguously, forms the four sliding update windows with
+    two 128-bit loads and `alignr`, and writes 8 uint16 outputs with a
+    non-temporal store.
+  The 13/7 predict (5-tap) carries two odd samples and one look-ahead sample
+  per pass-1 block; the update/output half is shared with the 9/7 version.
+  Boundary mirrors (left X[-1]->X[1], X[-3]->X[3]; right D[W]->D[W-2],
+  D[W+2]->D[W-4], X[W+1]->X[W-1]) are handled by padding the compact D
+  buffer. The kernel supports the decoder's 32-pixel slice-overlap crop
+  (computes the full input width, stores only the valid output range).
+- **Non-temporal output stores in the Haar final horizontal kernel** (guarded
+  by 16-byte alignment). The output plane is write-only, so streaming stores
+  avoid the read-for-ownership traffic of a normal write-allocate store.
+- Added `#pragma once` to the two scalar DD transform headers (they lacked
+  include guards, which broke the new AVX2 headers that include them).
+
+## Same-session A/B results
+
+Pinned interleaved microbenchmark, 1920x1080 int16 (cached):
+
+| Kernel | Scalar | AVX2 (new) |
+|---|---:|---:|
+| DD9/7 final-H | 7.69 ms/frame | 1.49 ms/frame |
+| DD13/7 final-H | ~7.4 ms/frame | ~1.5 ms/frame |
+
+Full decoder (eleven pinned runs, median):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| Haar0 decoder | 73.353 fps | 76.566 fps | **+4.4%** |
+| DD9/7 decoder | 41.866 fps | 52.167 fps | **+24.6%** |
+| DD13/7 decoder | 39.135 fps | 48.781 fps | **+24.7%** |
+
+The DD9/7 stage profile shows final-horizontal+output falling from 36.38% to
+21.00% of decoder worker time; VLC decode (31.67%) and inverse vertical
+(31.30%) are now the two largest stages.
+
+## Verification
+
+- Six of six native CTest targets passed.
+- Decoder output hashes unchanged:
+  DD9 `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`,
+  DD13 `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Crop, short, and misaligned geometries fall back to the scalar
+  implementation unchanged.
+
+## Research follow-up
+
+The two-pass "compute compact detail coefficients, then sweep with a sliding
+window" pattern avoids both the serial recurrence and the shuffle extraction
+that defeated earlier attempts; it generalizes to any separable lifting
+stencil. The next largest targets are VLC decode (now the top DD9/7 stage at
+~32%, and ~62% for Haar0) and the still-scalar coarser-level inverse vertical
+transforms.

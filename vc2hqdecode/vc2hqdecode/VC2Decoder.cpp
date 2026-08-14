@@ -147,9 +147,10 @@ void detect_cpu_features() {
 
 #ifndef NO_AVX2
   if (HAS_AVX2) {
-    // AVX2 inverse-vertical kernels (DD9/7, DD13/7 finest level) take
-    // precedence; everything else falls back to the SSE4.2 dispatch.
+    // AVX2 inverse-vertical and final-horizontal kernels (DD9/7, DD13/7)
+    // take precedence; everything else falls back to the SSE4.2 dispatch.
     get_invvtransform = get_invvtransform_avx2;
+    get_invhtransformfinal = get_invhtransformfinal_avx2;
   }
 #endif
 }

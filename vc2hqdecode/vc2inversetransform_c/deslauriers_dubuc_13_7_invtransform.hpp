@@ -25,6 +25,8 @@
  * For more information, contact us at ipstudio@bbc.co.uk.
  *****************************************************************************/
 
+#pragma once
+
 #define MIN(A,B) (((A)>(B))?(B):(A))
 #define MAX(A,B) (((A)<(B))?(B):(A))
 

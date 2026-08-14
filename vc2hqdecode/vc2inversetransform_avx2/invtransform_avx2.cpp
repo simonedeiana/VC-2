@@ -11,6 +11,7 @@
 #include "../vc2inversetransform_sse4_2/invtransform_sse4_2.hpp"
 #include "deslauriers_dubuc_9_7_invtransform.hpp"
 #include "deslauriers_dubuc_13_7_invtransform.hpp"
+#include <malloc.h>
 
 InplaceTransform get_invvtransform_avx2(int wavelet_index, int level, int depth, int sample_size) {
   if (sample_size == 2) {
@@ -29,4 +30,27 @@ InplaceTransform get_invvtransform_avx2(int wavelet_index, int level, int depth,
   }
 
   return get_invvtransform_sse4_2(wavelet_index, level, depth, sample_size);
+}
+
+InplaceTransformFinal get_invhtransformfinal_avx2(int wavelet_index, int active_bits, int sample_size) {
+  if (sample_size == 2) {
+    switch (wavelet_index) {
+    case VC2DECODER_WFT_DESLAURIERS_DUBUC_9_7:
+      switch (active_bits) {
+      case 10: return Deslauriers_Dubuc_9_7_invtransform_H_final_1_avx2_int16_t<10>;
+      case 12: return Deslauriers_Dubuc_9_7_invtransform_H_final_1_avx2_int16_t<12>;
+      }
+      break;
+    case VC2DECODER_WFT_DESLAURIERS_DUBUC_13_7:
+      switch (active_bits) {
+      case 10: return Deslauriers_Dubuc_13_7_invtransform_H_final_1_avx2_int16_t<10>;
+      case 12: return Deslauriers_Dubuc_13_7_invtransform_H_final_1_avx2_int16_t<12>;
+      }
+      break;
+    default:
+      break;
+    }
+  }
+
+  return get_invhtransformfinal_sse4_2(wavelet_index, active_bits, sample_size);
 }
