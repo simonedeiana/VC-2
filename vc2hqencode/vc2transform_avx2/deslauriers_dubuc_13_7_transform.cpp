@@ -310,3 +310,337 @@ void Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2(const char *_idata,
     memcpy(&odata[y * ostride], &odata[(2 * iheight - y - 1) * ostride], owidth);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Strided forward vertical kernels for the coarser levels (skip 2 and 4).
+
+static inline __m256i dd13f_load8_s2(const int16_t *p) {
+  __m128i a = _mm_loadu_si128((const __m128i *)(p + 0));
+  __m128i b = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i EV = _mm_setr_epi8(0,1,4,5,8,9,12,13,-1,-1,-1,-1,-1,-1,-1,-1);
+  return _mm256_cvtepi16_epi32(_mm_unpacklo_epi64(_mm_shuffle_epi8(a, EV),
+                                                  _mm_shuffle_epi8(b, EV)));
+}
+
+static inline void dd13f_store8_s2(int16_t *p, const __m256i v) {
+  const __m256i low_words = _mm256_setr_epi8(
+    0,1,4,5,8,9,12,13,-1,-1,-1,-1,-1,-1,-1,-1,
+    0,1,4,5,8,9,12,13,-1,-1,-1,-1,-1,-1,-1,-1);
+  const __m256i s = _mm256_shuffle_epi8(v, low_words);
+  const __m128i n = _mm_unpacklo_epi64(_mm256_castsi256_si128(s),
+                                       _mm256_extracti128_si256(s, 1));
+  __m128i a = _mm_loadu_si128((const __m128i *)(p + 0));
+  __m128i b = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i OD = _mm_setr_epi8(2,3,6,7,10,11,14,15,-1,-1,-1,-1,-1,-1,-1,-1);
+  const __m128i oa = _mm_shuffle_epi8(a, OD);
+  const __m128i ob = _mm_shuffle_epi8(b, OD);
+  const __m128i nh = _mm_srli_si128(n, 8);
+  _mm_storeu_si128((__m128i *)(p + 0), _mm_unpacklo_epi16(n, oa));
+  _mm_storeu_si128((__m128i *)(p + 8), _mm_unpacklo_epi16(nh, ob));
+}
+
+static inline __m128i dd13f_load4_s4(const int16_t *p) {
+  __m128i a = _mm_loadu_si128((const __m128i *)(p + 0));
+  __m128i b = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i M = _mm_setr_epi8(0,1,8,9,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1);
+  __m128i c = _mm_unpacklo_epi64(_mm_shuffle_epi8(a, M), _mm_shuffle_epi8(b, M));
+  return _mm_cvtepi16_epi32(_mm_shuffle_epi8(c, _mm_setr_epi8(0,1,2,3,8,9,10,11,
+                                                               -1,-1,-1,-1,-1,-1,-1,-1)));
+}
+
+static inline void dd13f_store4_s4(int16_t *p, const __m128i v) {
+  const __m128i n = _mm_shuffle_epi8(v, _mm_setr_epi8(0,1,4,5,8,9,12,13,
+                                                       -1,-1,-1,-1,-1,-1,-1,-1));
+  __m128i a = _mm_loadu_si128((const __m128i *)(p + 0));
+  __m128i b = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i sa = _mm_shuffle_epi8(n, _mm_setr_epi8(0,1,-1,-1,-1,-1,-1,-1,
+                                                        2,3,-1,-1,-1,-1,-1,-1));
+  const __m128i sb = _mm_shuffle_epi8(n, _mm_setr_epi8(4,5,-1,-1,-1,-1,-1,-1,
+                                                        6,7,-1,-1,-1,-1,-1,-1));
+  _mm_storeu_si128((__m128i *)(p + 0), _mm_blend_epi16(a, sa, 0x11));
+  _mm_storeu_si128((__m128i *)(p + 8), _mm_blend_epi16(b, sb, 0x11));
+}
+
+void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s2(void *_idata,
+                                                        const int istride,
+                                                        const int width,
+                                                        const int height,
+                                                        const int skip) {
+  if (skip != 2 || (width & 15) != 0 || height < 16) {
+    Deslauriers_Dubuc_13_7_transform_V_inplace<2, int16_t>(
+      _idata, istride, width, height, skip);
+    return;
+  }
+  int16_t *idata = (int16_t *)_idata;
+  for (int x = 0; x < width; x += 16) {
+    int y = 0;
+    __m256i Dm4, Dm2, Dm1, D, Dp1, Dp2, Dp3, Dp4;
+    __m256i Xm5, Xm3, Xm2, Xm1, Xp1;
+
+    D   = dd13f_load8_s2(idata + (y + 0) * istride + x);
+    Dp1 = dd13f_load8_s2(idata + (y + 2) * istride + x);
+    Dp2 = dd13f_load8_s2(idata + (y + 4) * istride + x);
+    Dp3 = dd13f_load8_s2(idata + (y + 6) * istride + x);
+    Dp4 = dd13f_load8_s2(idata + (y + 8) * istride + x);
+    Dm2 = D;
+
+    {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load8_s2(idata + (y + 10) * istride + x);
+      Dp4 = dd13f_load8_s2(idata + (y + 12) * istride + x);
+      Xm1 = Xp1;
+    }
+    y += 4;
+
+    {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Xm5 = Xp1;
+      Xm3 = Xm1;
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load8_s2(idata + (y + 10) * istride + x);
+      Dp4 = dd13f_load8_s2(idata + (y + 12) * istride + x);
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 4;
+
+    for (; y < height - 12; y += 4) {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load8_s2(idata + (y + 10) * istride + x);
+      Dp4 = dd13f_load8_s2(idata + (y + 12) * istride + x);
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+
+    {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load8_s2(idata + (y + 10) * istride + x);
+      Dp4 = Dp4;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 4;
+
+    {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+
+      Dm4 = Dm2;
+      Dm2 = D;
+      Dm1 = Dp1;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp2;
+      Dp3 = Dp3;
+      Dp4 = Dm2;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 4;
+
+    {
+      Xp1 = _mm256_sub_epi32(Dp1, dd13f_update(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+
+      Dp2 = Dm2;
+      Dm2 = D;
+      D   = D;
+      Dp1 = Dp1;
+      Dp3 = Dm1;
+      Dp4 = Dm4;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 4;
+
+    {
+      Xp1 = Xm1;
+      Xm2 = _mm256_add_epi32(Dm2, dd13f_predict(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store8_s2(idata + (y - 4) * istride + x, Xm2);
+      dd13f_store8_s2(idata + (y - 2) * istride + x, Xm1);
+    }
+  }
+}
+
+void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s4(void *_idata,
+                                                        const int istride,
+                                                        const int width,
+                                                        const int height,
+                                                        const int skip) {
+  if (skip != 4 || (width & 15) != 0 || height < 32) {
+    Deslauriers_Dubuc_13_7_transform_V_inplace<4, int16_t>(
+      _idata, istride, width, height, skip);
+    return;
+  }
+  int16_t *idata = (int16_t *)_idata;
+  for (int x = 0; x < width; x += 16) {
+    int y = 0;
+    __m128i Dm4, Dm2, Dm1, D, Dp1, Dp2, Dp3, Dp4;
+    __m128i Xm5, Xm3, Xm2, Xm1, Xp1;
+
+    D   = dd13f_load4_s4(idata + (y + 0) * istride + x);
+    Dp1 = dd13f_load4_s4(idata + (y + 4) * istride + x);
+    Dp2 = dd13f_load4_s4(idata + (y + 8) * istride + x);
+    Dp3 = dd13f_load4_s4(idata + (y + 12) * istride + x);
+    Dp4 = dd13f_load4_s4(idata + (y + 16) * istride + x);
+    Dm2 = D;
+
+    {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load4_s4(idata + (y + 20) * istride + x);
+      Dp4 = dd13f_load4_s4(idata + (y + 24) * istride + x);
+      Xm1 = Xp1;
+    }
+    y += 8;
+
+    {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Xm5 = Xp1;
+      Xm3 = Xm1;
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load4_s4(idata + (y + 20) * istride + x);
+      Dp4 = dd13f_load4_s4(idata + (y + 24) * istride + x);
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 8;
+
+    for (; y < height - 24; y += 8) {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load4_s4(idata + (y + 20) * istride + x);
+      Dp4 = dd13f_load4_s4(idata + (y + 24) * istride + x);
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+
+    {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+
+      Dm2 = D;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp4;
+      Dp3 = dd13f_load4_s4(idata + (y + 20) * istride + x);
+      Dp4 = Dp4;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 8;
+
+    {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+
+      Dm4 = Dm2;
+      Dm2 = D;
+      Dm1 = Dp1;
+      D   = Dp2;
+      Dp1 = Dp3;
+      Dp2 = Dp2;
+      Dp3 = Dp3;
+      Dp4 = Dm2;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 8;
+
+    {
+      Xp1 = _mm_sub_epi32(Dp1, dd13h_update4(Dm2, D, Dp2, Dp4));
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+
+      Dp2 = Dm2;
+      Dm2 = D;
+      D   = D;
+      Dp1 = Dp1;
+      Dp3 = Dm1;
+      Dp4 = Dm4;
+
+      Xm5 = Xm3;
+      Xm3 = Xm1;
+      Xm1 = Xp1;
+    }
+    y += 8;
+
+    {
+      Xp1 = Xm1;
+      Xm2 = _mm_add_epi32(Dm2, dd13h_predict13(Xm5, Xm3, Xm1, Xp1));
+      dd13f_store4_s4(idata + (y - 8) * istride + x, Xm2);
+      dd13f_store4_s4(idata + (y - 4) * istride + x, Xm1);
+    }
+  }
+}

@@ -33,6 +33,10 @@
 
 void Deslauriers_Dubuc_9_7_transform_V_inplace_avx2(void *, const int, const int, const int, const int);
 void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2(void *, const int, const int, const int, const int);
+void Deslauriers_Dubuc_9_7_transform_V_inplace_avx2_s2(void *, const int, const int, const int, const int);
+void Deslauriers_Dubuc_9_7_transform_V_inplace_avx2_s4(void *, const int, const int, const int, const int);
+void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s2(void *, const int, const int, const int, const int);
+void Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s4(void *, const int, const int, const int, const int);
 void Deslauriers_Dubuc_9_7_transform_H_inplace_10P2_avx2(const char *, const int, void **, const int, const int, const int, const int, const int);
 void Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2(const char *, const int, void **, const int, const int, const int, const int, const int);
 
@@ -113,12 +117,24 @@ InplaceTransform get_vtransform_avx2(int wavelet_index, int level, int coef_size
   if (coef_size == 2) {
     switch (wavelet_index) {
     case VC2ENCODER_WFT_DESLAURIERS_DUBUC_9_7:
-      if (level == 0)
+      switch (level) {
+      case 0:
         return Deslauriers_Dubuc_9_7_transform_V_inplace_avx2;
+      case 1:
+        return Deslauriers_Dubuc_9_7_transform_V_inplace_avx2_s2;
+      case 2:
+        return Deslauriers_Dubuc_9_7_transform_V_inplace_avx2_s4;
+      }
       break;
     case VC2ENCODER_WFT_DESLAURIERS_DUBUC_13_7:
-      if (level == 0)
+      switch (level) {
+      case 0:
         return Deslauriers_Dubuc_13_7_transform_V_inplace_avx2;
+      case 1:
+        return Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s2;
+      case 2:
+        return Deslauriers_Dubuc_13_7_transform_V_inplace_avx2_s4;
+      }
       break;
     case VC2ENCODER_WFT_LEGALL_5_3:
       switch (level) {
