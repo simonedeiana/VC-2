@@ -19,13 +19,30 @@ foreach(config Debug Release RelWithDebInfo MinSizeRel)
   set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib")
 endforeach()
 
-add_compile_options(/W3 /EHsc /permissive- /Zc:__cplusplus)
+add_compile_options(
+  "$<$<COMPILE_LANGUAGE:CXX>:/W3>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/EHsc>"
+  "$<$<COMPILE_LANGUAGE:CXX>:/permissive->"
+  "$<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>")
 add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/msvc-compat")
 
 find_package(Boost REQUIRED)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 include(CTest)
+
+option(VC2_ENABLE_CUDA "Build the experimental CUDA encoder transform" OFF)
+if(VC2_ENABLE_CUDA)
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+  else()
+    message(WARNING "VC2_ENABLE_CUDA is ON, but no CUDA compiler was found; using CPU backends only")
+    set(VC2_ENABLE_CUDA OFF)
+  endif()
+endif()
 
 # VC-2 reference encoder/decoder and reference library.
 set(reference_root "${CMAKE_CURRENT_SOURCE_DIR}/vc2-reference")
@@ -99,6 +116,18 @@ target_include_directories(vc2transform_avx2 PRIVATE "${encode_generated}/avx2")
 target_compile_options(vc2transform_avx PRIVATE /arch:AVX)
 target_compile_options(vc2transform_avx2 PRIVATE /arch:AVX2)
 
+if(VC2_ENABLE_CUDA)
+  add_library(vc2transform_cuda STATIC
+    ${encode_root}/vc2transform_cuda/transform_cuda.cu)
+  target_include_directories(vc2transform_cuda PUBLIC ${encode_root}/vc2transform_cuda)
+  target_link_libraries(vc2transform_cuda PUBLIC CUDA::cudart)
+  set_target_properties(vc2transform_cuda PROPERTIES
+    CUDA_ARCHITECTURES 61
+    CUDA_RUNTIME_LIBRARY Static
+    CUDA_STANDARD 14
+    CUDA_STANDARD_REQUIRED ON)
+endif()
+
 add_library(vc2hqencode SHARED
   ${encode_root}/vc2hqencode/vc2hqencode.cpp
   ${encode_root}/vc2hqencode/VC2Encoder.cpp
@@ -113,6 +142,10 @@ target_compile_definitions(vc2hqencode PRIVATE
 target_include_directories(vc2hqencode PUBLIC ${encode_root} PRIVATE ${encode_root}/redist)
 target_link_libraries(vc2hqencode PRIVATE
   vc2transform_c vc2transform_sse vc2transform_avx vc2transform_avx2)
+if(VC2_ENABLE_CUDA)
+  target_compile_definitions(vc2hqencode PRIVATE VC2_ENABLE_CUDA=1)
+  target_link_libraries(vc2hqencode PRIVATE vc2transform_cuda)
+endif()
 
 add_executable(vc2encode
   ${encode_root}/testprogs/vc2encode.cpp
@@ -130,9 +163,27 @@ add_library(vc2invtransform_sse STATIC
   ${decode_root}/vc2inversetransform_sse4_2/invtransform_sse4_2.cpp
   ${decode_root}/vc2inversetransform_sse4_2/dequantise_sse4_2.cpp
   ${decode_root}/vc2inversetransform_sse4_2/vlc_sse4_2.cpp)
-foreach(target vc2invtransform_c vc2invtransform_sse)
+add_library(vc2invtransform_avx2 STATIC
+  ${decode_root}/vc2inversetransform_avx2/invtransform_avx2.cpp
+  ${decode_root}/vc2inversetransform_avx2/deslauriers_dubuc_9_7_invtransform.cpp
+  ${decode_root}/vc2inversetransform_avx2/deslauriers_dubuc_13_7_invtransform.cpp)
+foreach(target vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
   target_include_directories(${target} PUBLIC ${decode_root} PRIVATE ${decode_root}/vc2hqdecode)
 endforeach()
+target_compile_options(vc2invtransform_avx2 PRIVATE /arch:AVX2)
+target_link_libraries(vc2invtransform_avx2 PUBLIC vc2invtransform_sse)
+
+if(VC2_ENABLE_CUDA)
+  add_library(vc2invtransform_cuda STATIC
+    ${decode_root}/vc2invtransform_cuda/decode_cuda.cu)
+  target_include_directories(vc2invtransform_cuda PUBLIC ${decode_root} PRIVATE ${decode_root}/vc2hqdecode)
+  target_link_libraries(vc2invtransform_cuda PUBLIC CUDA::cudart)
+  set_target_properties(vc2invtransform_cuda PROPERTIES
+    CUDA_ARCHITECTURES 61
+    CUDA_RUNTIME_LIBRARY Static
+    CUDA_STANDARD 14
+    CUDA_STANDARD_REQUIRED ON)
+endif()
 
 add_library(vc2hqdecode SHARED
   ${decode_root}/vc2hqdecode/vc2hqdecode.cpp
@@ -142,7 +193,11 @@ add_library(vc2hqdecode SHARED
   ${decode_root}/vc2hqdecode/stream.cpp)
 target_compile_definitions(vc2hqdecode PRIVATE VC2HQDECODE_DLL ASIO_STANDALONE)
 target_include_directories(vc2hqdecode PUBLIC ${decode_root} PRIVATE ${decode_root}/redist)
-target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_c vc2invtransform_sse)
+target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
+if(VC2_ENABLE_CUDA)
+  target_compile_definitions(vc2hqdecode PRIVATE VC2_ENABLE_CUDA=1)
+  target_link_libraries(vc2hqdecode PRIVATE vc2invtransform_cuda)
+endif()
 
 add_executable(vc2decode ${decode_root}/testprogs/vc2decode.cpp)
 target_include_directories(vc2decode PRIVATE ${decode_root} ${decode_root}/testprogs)
@@ -179,7 +234,7 @@ if(BUILD_TESTING)
   target_compile_definitions(vc2decodertest PRIVATE VC2HQDECODE_DLL)
   target_include_directories(vc2decodertest PRIVATE
     ${decode_root} ${decode_root}/vc2hqdecode ${decode_root}/redist)
-  target_link_libraries(vc2decodertest PRIVATE vc2invtransform_c vc2invtransform_sse)
+  target_link_libraries(vc2decodertest PRIVATE vc2invtransform_c vc2invtransform_sse vc2invtransform_avx2)
   add_test(NAME vc2decodertest COMMAND vc2decodertest)
 endif()
 

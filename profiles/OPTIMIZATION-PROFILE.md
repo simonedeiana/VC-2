@@ -464,3 +464,73 @@ transform target should be the inverse-vertical stage (~29% of DD9/7 decoder
 time, already SSE4.2; an AVX2 eight-column variant would halve loop/state
 overhead) or the VLC decode stage (24% for DD9/7, 61% for Haar0), not the
 final-H arithmetic.
+
+---
+
+# Round 7 — DD9/7 and DD13/7 AVX2 inverse vertical
+
+Date: 2026-08-13
+
+## Coverage
+
+Round 5 left the DD9/7 and DD13/7 finest-level inverse vertical transforms as
+SSE4.2 four-column kernels (one SIMD lane per image column, int16 -> int32
+widening). The inverse-vertical stage was still 29.25% (DD9/7) of decoder
+worker time, and it was the last compute-bound transform stage (Round 6
+showed the final horizontal stage is memory-bound, so SIMD cannot help
+there).
+
+## Retained change
+
+- Added an AVX2 eight-column variant of the DD9/7 and DD13/7 finest-level
+  inverse vertical kernels in a new `vc2invtransform_avx2` static library
+  (compiled with `/arch:AVX2`, mirroring the encoder's `vc2transform_avx2`).
+  The lifting structure is identical to the SSE4.2 kernels; only the width
+  doubles (8 lanes per iteration, `_mm256_cvtepi16_epi32` loads and
+  truncating `shuffle_epi8` + `unpacklo_epi64` stores).
+- New `get_invvtransform_avx2` dispatch returns the AVX2 kernels for the DD
+  finest level and otherwise falls back to `get_invvtransform_sse4_2`.
+- The decoder selects the AVX2 dispatch when runtime detection reports AVX2
+  (checked after the SSE4.2 block, so AVX2 wins only for the transforms that
+  have AVX2 kernels).
+- Added DD9/7 and DD13/7 vertical test rows (with an AVX2 check) to the
+  inverse-transform test suite.
+
+## Same-session A/B results
+
+Pinned, interleaved microbenchmark on 1920x1080 int16 data (scalar vs SSE4.2
+vs AVX2 full-plane finest-level V):
+
+| Kernel | Scalar | SSE4.2 | AVX2 |
+|---|---:|---:|---:|
+| DD9/7 V | 4.25 ms/frame | 1.42 ms/frame | 0.76 ms/frame |
+| DD13/7 V | 4.61 ms/frame | 1.62 ms/frame | 0.83 ms/frame |
+
+Full decoder (seven pinned runs, median):
+
+| Transform | Before (SSE4.2 V) | After (AVX2 V) | Improvement |
+|---|---:|---:|---:|
+| DD9/7 decoder | 39.998 fps | 41.377 fps | **+3.45%** |
+| DD13/7 decoder | 37.521 fps | 39.130 fps | **+4.29%** |
+
+The inverse-vertical stage profile dropped from 29.25% to 25.10% of decoder
+worker time (DD9/7). The final-horizontal+output stage is now the largest
+(36.55%) but is memory-bound (Round 6).
+
+## Verification
+
+- Six of six native CTest targets passed (including the new AVX2 DD V rows).
+- Decoder output hashes unchanged:
+  DD9 `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`,
+  DD13 `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+- Fallback geometry (width not a multiple of 8) still routes to the scalar
+  implementation.
+
+## Research follow-up
+
+The 8-column AVX2 kernel roughly halves the loop/state overhead of the
+4-column SSE4.2 kernel and doubles the arithmetic width; on this Haswell CPU
+the measured 1.9-2x kernel speedup confirms the vertical lifting recurrence
+is compute-bound rather than port-bound at 8 lanes. The natural next targets
+are the remaining compute-heavy stages: VLC decode (24% DD9/7, 61% Haar0) and
+the coarser-level inverse vertical transforms (still scalar int16).
