@@ -797,3 +797,58 @@ worker time. Cumulative encoder gains (scalar baseline -> now): DD9/7
 Remaining encoder targets: the coarser forward vertical levels (skip 2/4/8),
 the L1+ forward horizontal levels (5.01%), and the serialise bit-packer
 (14.54%). The quantiser-search stage (54.20%) now dominates the DD encoder.
+
+---
+
+# Round 12 — encoder DD strided forward vertical (coarser levels, AVX2)
+
+## Analysis
+
+The DD forward vertical AVX2 kernels from Round 10 only handled level 0
+(skip 1). Levels 1 and 2 (skip 2 and 4, the LL subbands) still fell through
+to the scalar template. The wavelet levels store the LL subband interleaved
+(even rows/columns), so the level-1/2 vertical transforms walk strided
+memory rather than contiguous rows.
+
+The scalar lifting recurrence is identical; only the column access changes.
+For skip 2 the 8 columns sit at even int16 positions of a 16-sample span, so
+the load is a two-lane de-interleave and the store is a read-modify-write
+that re-interleaves the computed columns around the untouched odd columns.
+For skip 4 the 4 columns sit at positions 0/4/8/12 of a 16-sample span, so a
+128-bit four-lane kernel with `pshufb`+`pblendw` handles load/store.
+
+## Retained change
+
+- Added `*_V_inplace_avx2_s2` and `*_V_inplace_avx2_s4` for DD9/7 and DD13/7
+  in the encoder's `vc2transform_avx2` library, wired into
+  `get_vtransform_avx2` levels 1 and 2. Geometry falls back to the scalar
+  template when the stride assumptions (width multiple of 16, sufficient
+  height) do not hold.
+
+## Same-session A/B results
+
+Pinned 60-frame medians, before vs after (both builds include Rounds 9-11):
+
+| Workload | Before | After | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 31.84 fps | 33.67 fps | **+5.7%** |
+| DD13/7 encoder | 29.93 fps | 31.61 fps | **+5.6%** |
+
+The DD9/7 vertical-wavelet stage dropped from 13.44% to 9.27% of encoder
+worker time. Cumulative encoder gains (scalar baseline -> now): DD9/7
+25.63 -> 33.67 fps (**+31.4%**), DD13/7 23.23 -> 31.61 fps (**+36.1%**).
+
+## Verification
+
+- Six of six native CTest targets passed.
+- DD9/7 and DD13/7 encoder streams byte-identical between the AVX2 and
+  scalar dispatches:
+  DD9 `DF99249F127BFA10C2407448165C92409F29811F5EB14DB0F129FE2418D3F08F`,
+  DD13 `FF7EA76F32BD043F83A31A0E3A1EE5F1AA63D0519E033D37A5670EC481432F62`.
+
+## Research follow-up
+
+The quantiser-search stage (56.27%) now dominates the DD encoder — it is the
+single full quantise+VLC trial per slice (already AVX2 from Round 9). The
+serialise bit-packer (15.08%) and the L1+ forward horizontal levels (5.64%)
+remain. Decoder-side work is unchanged this round.
