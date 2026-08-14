@@ -391,3 +391,76 @@ Extensions](https://www.researchgate.net/publication/220951124_Vectorization_of_
 Lifting](https://www.researchgate.net/publication/221392398_A_Single-Loop_Approach_to_SIMD_Parallelization_of_2-D_Wavelet_Lifting),
 and the [JPEG 2000 lifting-transform specification](https://www.itu.int/epublications/publication/itu-t-t-801-v3-2023-08-08-jpeg-2000-image-coding-system-extensions).
 
+
+---
+
+# Round 6 — DD9/7 and DD13/7 final horizontal SIMD (rejected)
+
+Date: 2026-08-13
+
+## Coverage
+
+Continuation of the Round 5 transform work. Stage profiling put the
+final-horizontal+output stage at 34.49% (DD9/7) and ~35% (DD13/7) of decoder
+worker time, making it the largest transform cost. The goal was to vectorize
+the scalar final horizontal recurrence.
+
+## Analysis
+
+The scalar final-H looks like a serial recurrence along x (state carried
+between iterations), but every output depends only on loaded samples:
+
+- DD9/7: even `out[p] = D[p] = X[p] - ((X[p-1]+X[p+1]+2)>>2)`;
+  odd `out[p] = X[p] + ((-D[p-3]+9*D[p-1]+9*D[p+1]-D[p+3]+8)>>4)`.
+- DD13/7: same odd formula, with predict
+  `D[p] = X[p] - ((-X[p-3]+9*X[p-1]+9*X[p+1]-X[p+3]+16)>>5)`.
+
+It is therefore a parallel column stencil, vectorizable with contiguous
+loads/stores (unlike the rejected Round 5 row-interleaved trial). SSE4.2
+kernels were written that compute four output columns per block from two
+(DD9) or three (DD13) 16-byte window loads, extracting the strided even/odd
+operand lanes with byte shuffles, and keeping D in int32. Boundary columns
+reproduced the exact scalar mirrors (traced from the C tail: left
+X[-1]->X[1], X[-3]->X[3]; right DD9 D[W]->D[W-2], D[W+2]->D[W-4]; DD13
+X[W+1]->X[W-1], D[W]->D[W-2], D[W+2]->D[W-4]).
+
+## Result (rejected)
+
+The kernels were byte-identical (SHA-256 matched the recorded hashes; the
+full inverse-transform test suite passed for active_bits 10 and 12 across all
+crop offsets), but they were SLOWER than the existing scalar code:
+
+| Kernel | Scalar | SSE4.2 (new) |
+|---|---:|---:|
+| DD9/7 final-H | 6.91 ms/frame | 8.15 ms/frame |
+| DD13/7 final-H | 7.41 ms/frame | 10.55 ms/frame |
+
+Pinned, interleaved microbenchmark on 1920x1080 int16 data. The full decoder
+benchmark was unchanged (39.983 fps vs 39.998 fps baseline) and the stage
+profile was unchanged (34.23% vs 34.49%), confirming the stage is
+memory-bound in the real decode (reads the coefficient plane, writes the
+uint16 output plane), so compute SIMD cannot help.
+
+Root cause: Haswell executes shuffles and `cvtepi16_epi32` widenings on a
+single port (p5); the extraction-heavy kernel needs ~1-2 p5 operations per
+output, whereas the MSVC-generated scalar is already well scheduled and the
+real decode is store-limited. The compact de-interleave alternative would
+still be p5-limited and cannot beat the memory wall.
+
+## Actions
+
+- Reverted the final-H kernels, dispatch, and test additions (working tree
+  restored to Round 5 commit `7a55308`; encoder `__restrict` VLC work in the
+  working tree was untouched).
+- Verified hashes still match after revert: DD9
+  `45B4DA1EBC8559B47223DF2084433BFBAEC53A1C96E1D9377D8F9680BC9B5277`, DD13
+  `C08EB0D68953FDD1AE4DB36362E538981B77695D73BE2DBBF834737CABEB3AC0`.
+
+## Research follow-up
+
+The negative result isolates the boundary between compute-bound and
+memory-bound stages on this CPU. The DD final-H is memory-bound, so the next
+transform target should be the inverse-vertical stage (~29% of DD9/7 decoder
+time, already SSE4.2; an AVX2 eight-column variant would halve loop/state
+overhead) or the VLC decode stage (24% for DD9/7, 61% for Haar0), not the
+final-H arithmetic.
