@@ -964,3 +964,35 @@ The quantiser-search (70%) now bundles the quantise, the VLC lookup, and the
 bit-packing; fusing the packing into the quantise loop (packing inline rather
 than via the scan-order scatter + separate pack pass) is the next lever. The
 L1+ forward horizontal levels (5.6%) remain the last un-vectorised transform.
+
+---
+
+# Round 15 — AVX2 quantise+pack for 16-wide chroma
+
+## Change
+
+The existing AVX2 quantise+VLC+bit-pack kernel was generalized from 32x8
+luma slices to 16x8 chroma slices. A dedicated 16x8 scan-order table preserves
+the scalar coefficient order; the non-AVX2 path continues to use the original
+scalar fallback. Both chroma components now avoid the generic scalar
+`encode_sample` loop and set `packed_valid` directly for the existing
+serializer fast path.
+
+## Result
+
+Pinned 30-frame Haar0 encoder A/B medians, 21 interleaved pairs per run:
+
+| Run | Clean baseline | AVX2 chroma | Improvement |
+|---|---:|---:|---:|
+| 1 | 39.343 fps | 48.680 fps | **+23.7%** |
+| 2 | 39.948 fps | 49.123 fps | **+23.0%** |
+
+The candidate passed the full tier: six native tests, three conformance
+streams, and identical smoke stream/pixel hashes for Haar0, DD9/7, and
+DD13/7. The change was promoted as commit `0c96986`.
+
+## Research follow-up
+
+The fastest-mode encoder now uses the AVX2 quantise+pack path for all three
+components of the standard 32x8x3 slice. Remaining work should focus on the
+DD L1+ forward horizontal transforms and any decoder-side bottlenecks.
