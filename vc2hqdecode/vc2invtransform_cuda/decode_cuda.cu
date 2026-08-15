@@ -649,7 +649,7 @@ bool vc2_cuda_decode_picture(
 
   // Kernel 1: VLC decode + dequant, one stream per lane.
   const int n_streams = n_slices * 3;
-  const int block1 = 128;
+  const int block1 = 256;
   const int grid1 = (n_streams + block1 - 1) / block1;
   vc2_decode_vlc_kernel<<<grid1, block1, 0, decode_stream>>>(
       device_payload, device_table,
