@@ -1201,3 +1201,44 @@ cross-binary variation stayed within the experiment tolerance.
 Final output is no longer the largest DD decoder stage after widening the
 batch. Remaining work is focused on inverse-horizontal and any safe encoder
 quantiser-search reductions.
+
+---
+
+# Round 21 — DD9 geometric quantiser-search bound
+
+## Change
+
+The DD9/7 encoder now doubles the QI trial step after each invalid size
+trial, up to the maximum QI, before entering the existing binary refinement.
+The search remains exact because coded size is monotonic with QI; DD13/7,
+Haar0, eighth-search, and the refinement phase retain their prior paths.
+
+## Result
+
+The candidate was compared with a clean full-tier run of `e947e44` using
+nine 30-frame runs. The full-tier medians were:
+
+| Workload | Clean baseline | DD9 exponential bound | Improvement |
+|---|---:|---:|---:|
+| DD9/7 encoder | 40.841 fps | 41.347 fps | **+1.2%** |
+| DD13/7 encoder | 39.460 fps | 38.437 fps | -2.6%* |
+| Haar0 encoder | 49.313 fps | 48.943 fps | -0.8%* |
+
+*The non-target paths are unchanged; their full-tier medians varied across
+the matched runs. A second full candidate run measured DD13/7 at 39.355 fps
+and Haar0 at 48.965 fps. The focused quick tier kept DD9/7 at 40.60–41.05
+fps across all three runs.
+
+## Verification
+
+- Smoke, quick, and full tiers passed all six native tests.
+- The full tier passed all three conformance validators.
+- Haar0, DD9/7, and DD13/7 stream and decoded-pixel hashes remained exactly
+  unchanged.
+- The change was promoted as commit `cdc8a2b`.
+
+## Research follow-up
+
+DD9/7 quantiser selection now has a measured encoder gain. DD13/7 remains
+the next encoder target, while decoder work is still focused on intermediate
+inverse-horizontal lifting.

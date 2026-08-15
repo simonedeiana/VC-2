@@ -98,6 +98,15 @@ Correctness hashes:
 These numbers are historical orientation, not permanent acceptance
 thresholds. Re-baseline after code, compiler, power-plan, or hardware changes.
 
+## Current retained head
+
+The current `optimizations` head is `cdc8a2b`, which adds a DD9/7-only
+geometric expansion phase to quantiser selection before the existing binary
+refinement. The full tier retained exact Haar0, DD9/7, and DD13/7 stream and
+pixel hashes, passed six native tests and three validators, and measured a
+repeatable roughly 1.2% DD9/7 encoder improvement. The change does not alter
+the DD13/7 or Haar0 search paths.
+
 ## Search islands and source map
 
 The configured islands deliberately preserve diverse lines of research:
