@@ -1116,3 +1116,46 @@ stage falling by roughly 30% for both DD workloads.
 Decoder inverse-vertical is no longer the dominant DD stage. The next decoder
 targets are inverse-horizontal and final output, while the encoder-side
 quantiser-search and remaining transform memory traffic remain open.
+
+---
+
+# Round 19 — Compact decoder VLC lookup entries
+
+## Change
+
+The decoder VLC lookup entries now use their natural 16-byte stride while
+retaining 16-byte alignment for the SSE lookup load. The previous 32-byte
+alignment inflated the 1024-entry table from 16 KiB of payload to a 32 KiB
+object, increasing cache pressure without adding fields or changing lookup
+semantics.
+
+## Result
+
+Interleaved focused profiles used 8-frame samples on the same-head baseline.
+The DD13/7 median showed the clearest end-to-end gain, with a consistent VLC
+stage reduction across the DD workloads:
+
+| Workload | Baseline total | Compact total | Improvement | Baseline VLC | Compact VLC |
+|---|---:|---:|---:|---:|---:|
+| DD13/7 | 141.913ms | 138.155ms | **-2.6%** | 34.384ms | 31.839ms (**-7.4%**) |
+| DD9/7 | 127.650ms | 126.874ms | -0.6% | 33.512ms | 31.825ms (**-5.0%**) |
+| Haar0 | 80.487ms | 80.218ms | -0.3% | 35.841ms | 35.931ms (+0.3%) |
+
+The full tier measured 58.140 fps on DD13/7, 63.966 fps on DD9/7, and
+100.335 fps on Haar0. Encoder measurements remained within the normal run
+variation at 39.260, 41.142, and 48.544 fps respectively.
+
+## Verification
+
+- Smoke, quick, and full tiers passed all six native tests.
+- The full tier passed all three conformance validators.
+- Haar0, DD9/7, and DD13/7 stream and decoded-pixel hashes remained exactly
+  unchanged.
+- The change was promoted as commit `61925c8`.
+
+## Research follow-up
+
+The decoder VLC stage is now a smaller share of the DD workload. Remaining
+decoder opportunities are inverse-horizontal and final output; encoder
+quantiser-search remains the largest measured stage but earlier fused-path
+experiments have not yet produced a safe improvement.
