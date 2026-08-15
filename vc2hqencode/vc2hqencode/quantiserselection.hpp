@@ -644,6 +644,8 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
     int qi_ceil  = MAX_QI;
     int lengths[3];
     int inc = QI_FIRST_INC;
+    const bool use_dd_exponential_search =
+        (wavelet_index == VC2ENCODER_WFT_DESLAURIERS_DUBUC_9_7);
 
     do {
       qi_floor = qi_cur;
@@ -666,6 +668,13 @@ template<int w, int h, int depth, int QUAL, class T> inline void choose_quantise
       }
       length = 4 + lengths[0] + lengths[1] + lengths[2];
       count++;
+      if (use_dd_exponential_search &&
+          (lengths[0]/slice_size_scalar > 255 ||
+           lengths[1]/slice_size_scalar > 255 ||
+           lengths[2]/slice_size_scalar > 255 ||
+           length > max_size) && qi_cur < MAX_QI) {
+        inc = min(inc * 2, MAX_QI - qi_cur);
+      }
     } while(qi_cur < MAX_QI &&
             (lengths[0]/slice_size_scalar > 255 ||
              lengths[1]/slice_size_scalar > 255 ||
