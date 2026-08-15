@@ -230,14 +230,18 @@ class ProgramDatabase:
             raise KeyError(program_id)
         return self._decode(row)
 
-    def latest_baseline(self, branch: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
+    def latest_baseline(self, branch: str, tier: str | None = None) -> dict[str, Any] | None:
+        rows = self.connection.execute(
             """SELECT * FROM programs
                WHERE branch = ? AND status = 'baseline'
-               ORDER BY created_at DESC LIMIT 1""",
+               ORDER BY created_at DESC""",
             (branch,),
-        ).fetchone()
-        return self._decode(row) if row else None
+        ).fetchall()
+        for row in rows:
+            item = self._decode(row)
+            if tier is None or item["result"].get("tier") == tier:
+                return item
+        return None
 
     def inspirations(self, branch: str, limit: int = 4) -> list[dict[str, Any]]:
         rows = self.connection.execute(
@@ -248,7 +252,7 @@ class ProgramDatabase:
         ).fetchall()
         return [self._decode(row) for row in rows]
 
-    def sample_parent(self, branch: str, rng: random.Random) -> dict[str, Any]:
+    def sample_parent(self, branch: str, rng: random.Random, tier: str) -> dict[str, Any]:
         rows = self.connection.execute(
             """SELECT p.* FROM elites e JOIN programs p ON p.id = e.program_id
                WHERE e.branch = ?
@@ -259,7 +263,13 @@ class ProgramDatabase:
         ).fetchall()
         if not rows:
             raise RuntimeError(f"no baseline or elites recorded for {branch}")
-        population = [self._decode(row) for row in rows]
+        population = [
+            item
+            for item in (self._decode(row) for row in rows)
+            if item["result"].get("tier") == tier
+        ]
+        if not population:
+            raise RuntimeError(f"no {tier} baseline or elites recorded for {branch}")
         weights = [max(item["score"], 1.0) for item in population]
         return rng.choices(population, weights=weights, k=1)[0]
 
