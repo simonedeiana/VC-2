@@ -24,6 +24,10 @@ No model SDK is required. The controller accepts any proposer executable that
 can read a prompt file and write a proposal file. This keeps credentials and
 model choice outside the repository.
 
+For continuation by another coding agent, start with
+`autoresearch/LLM-HANDOFF.md`; it contains the current baseline, source map,
+required reading, operational protocol, and a ready-to-use kickoff prompt.
+
 ## Baseline
 
 From the desired branch worktree:
