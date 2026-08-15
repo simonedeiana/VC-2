@@ -1159,3 +1159,45 @@ The decoder VLC stage is now a smaller share of the DD workload. Remaining
 decoder opportunities are inverse-horizontal and final output; encoder
 quantiser-search remains the largest measured stage but earlier fused-path
 experiments have not yet produced a safe improvement.
+
+---
+
+# Round 20 — Widen DD final inverse/output batches
+
+## Change
+
+The AVX2 DD9/7 and DD13/7 final inverse-horizontal kernels now process two
+adjacent eight-pixel groups together with 256-bit arithmetic. The compact
+intermediate D samples are contiguous across the pair, allowing one set of
+sliding-window loads and two 128-bit non-temporal stores for each 16-pixel
+batch. The existing eight-pixel loop remains as the tail path, and all prior
+alignment/crop checks and scalar fallbacks are unchanged.
+
+## Result
+
+Twelve interleaved 8-frame profile pairs on the same head produced these
+medians:
+
+| Workload | Baseline total | Widened total | Improvement | Baseline final stage | Widened final stage |
+|---|---:|---:|---:|---:|---:|
+| DD9/7 | 122.556ms | 116.805ms | **-4.7%** | 33.520ms | 27.508ms (**-17.9%**) |
+| DD13/7 | 139.314ms | 134.823ms | **-3.2%** | 43.099ms | 37.311ms (**-13.4%**) |
+| Haar0 | 75.584ms | 75.958ms | +0.5% | 13.460ms | 13.559ms |
+
+The full tier measured 62.893 fps on DD13/7, 68.493 fps on DD9/7, and
+104.889 fps on Haar0. The Haar path does not use this kernel; its small
+cross-binary variation stayed within the experiment tolerance.
+
+## Verification
+
+- Smoke, quick, and full tiers passed all six native tests.
+- The full tier passed all three conformance validators.
+- Haar0, DD9/7, and DD13/7 stream and decoded-pixel hashes remained exactly
+  unchanged.
+- The change was promoted as commit `61dad41`.
+
+## Research follow-up
+
+Final output is no longer the largest DD decoder stage after widening the
+batch. Remaining work is focused on inverse-horizontal and any safe encoder
+quantiser-search reductions.
