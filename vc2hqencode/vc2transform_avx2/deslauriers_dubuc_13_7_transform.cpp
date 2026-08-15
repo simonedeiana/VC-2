@@ -311,6 +311,126 @@ void Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2(const char *_idata,
   }
 }
 
+// AVX2 forward horizontal transform for the strided LL levels. The lifting
+// stages are evaluated on eight independent pairs in int32 scratch while the
+// scalar mirror rules remain unchanged at both boundaries.
+static inline __m256i dd13h_update8(__m256i a, __m256i b, __m256i c, __m256i d) {
+  __m256i v = _mm256_sub_epi32(_mm256_setzero_si256(), a);
+  v = _mm256_add_epi32(v, _mm256_add_epi32(b, _mm256_slli_epi32(b, 3)));
+  v = _mm256_add_epi32(v, _mm256_add_epi32(c, _mm256_slli_epi32(c, 3)));
+  v = _mm256_sub_epi32(v, d);
+  return _mm256_srai_epi32(_mm256_add_epi32(v, _mm256_set1_epi32(8)), 4);
+}
+
+static inline __m256i dd13h_predict8(__m256i a, __m256i b, __m256i c, __m256i d) {
+  __m256i v = _mm256_sub_epi32(_mm256_setzero_si256(), a);
+  v = _mm256_add_epi32(v, _mm256_add_epi32(b, _mm256_slli_epi32(b, 3)));
+  v = _mm256_add_epi32(v, _mm256_add_epi32(c, _mm256_slli_epi32(c, 3)));
+  v = _mm256_sub_epi32(v, d);
+  return _mm256_srai_epi32(_mm256_add_epi32(v, _mm256_set1_epi32(16)), 5);
+}
+
+static inline __m256i dd13h_load8_stride4(const int16_t *p) {
+  const __m128i M = _mm_setr_epi8(0, 1, 8, 9, -1, -1, -1, -1,
+                                  -1, -1, -1, -1, -1, -1, -1, -1);
+  const __m128i a = _mm_loadu_si128((const __m128i *)(p + 0));
+  const __m128i b = _mm_loadu_si128((const __m128i *)(p + 8));
+  const __m128i c = _mm_loadu_si128((const __m128i *)(p + 16));
+  const __m128i d = _mm_loadu_si128((const __m128i *)(p + 24));
+  const __m128i ab = _mm_unpacklo_epi32(_mm_shuffle_epi8(a, M),
+                                        _mm_shuffle_epi8(b, M));
+  const __m128i cd = _mm_unpacklo_epi32(_mm_shuffle_epi8(c, M),
+                                        _mm_shuffle_epi8(d, M));
+  return _mm256_cvtepi16_epi32(_mm_unpacklo_epi64(ab, cd));
+}
+
+template<int skip> static void dd13h_transform_inplace_avx2(void *_idata,
+                                                             const int istride,
+                                                             const int width,
+                                                             const int height,
+                                                             const int) {
+  if (width < 16 * skip || (width % (16 * skip)) != 0) {
+    Deslauriers_Dubuc_13_7_transform_H_inplace<skip, int16_t>(
+      _idata, istride, width, height, 0);
+    return;
+  }
+
+  int16_t *idata = (int16_t *)_idata;
+  const int nE = width / (2 * skip);
+  int32_t *even32 = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+  int32_t *odd32  = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+  int32_t *Oscr   = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+  int32_t *e = even32 + 2;
+  int32_t *o = odd32 + 2;
+  int32_t *Op = Oscr + 2;
+
+  for (int y = 0; y < height; y += skip) {
+    int16_t *row = idata + (size_t)y * istride;
+    if (skip == 2) {
+      for (int j0 = 0; j0 < nE; j0 += 8) {
+        const __m256i ev = dd13h_load8_stride4(row + 4 * j0);
+        const __m256i ov = dd13h_load8_stride4(row + 4 * j0 + 2);
+        _mm256_storeu_si256((__m256i *)(e + j0), _mm256_slli_epi32(ev, 1));
+        _mm256_storeu_si256((__m256i *)(o + j0), _mm256_slli_epi32(ov, 1));
+      }
+    } else {
+      for (int j = 0; j < nE; j++) {
+        e[j] = (int32_t)row[(2 * j) * skip] << 1;
+        o[j] = (int32_t)row[(2 * j + 1) * skip] << 1;
+      }
+    }
+
+    e[-1] = e[0];
+    e[-2] = e[0];
+    e[nE] = e[nE - 1];
+    e[nE + 1] = e[nE - 2];
+
+    for (int j0 = 0; j0 < nE; j0 += 8) {
+      const __m256i a = _mm256_loadu_si256((const __m256i *)(e + j0 - 1));
+      const __m256i b = _mm256_loadu_si256((const __m256i *)(e + j0));
+      const __m256i c = _mm256_loadu_si256((const __m256i *)(e + j0 + 1));
+      const __m256i d = _mm256_loadu_si256((const __m256i *)(e + j0 + 2));
+      const __m256i odd = _mm256_loadu_si256((const __m256i *)(o + j0));
+      _mm256_storeu_si256((__m256i *)(Op + j0),
+                          _mm256_sub_epi32(odd, dd13h_update8(a, b, c, d)));
+    }
+    Op[-2] = Op[1];
+    Op[-1] = Op[0];
+    Op[nE] = Op[nE - 1];
+
+    for (int j0 = 0; j0 < nE; j0 += 8) {
+      const __m256i ev = _mm256_loadu_si256((const __m256i *)(e + j0));
+      const __m256i a = _mm256_loadu_si256((const __m256i *)(Op + j0 - 2));
+      const __m256i b = _mm256_loadu_si256((const __m256i *)(Op + j0 - 1));
+      const __m256i c = _mm256_loadu_si256((const __m256i *)(Op + j0));
+      const __m256i d = _mm256_loadu_si256((const __m256i *)(Op + j0 + 1));
+      _mm256_storeu_si256((__m256i *)(e + j0),
+                          _mm256_add_epi32(ev, dd13h_predict8(a, b, c, d)));
+    }
+
+    for (int j = 0; j < nE; j++) {
+      row[(2 * j) * skip] = (int16_t)e[j];
+      row[(2 * j + 1) * skip] = (int16_t)Op[j];
+    }
+  }
+}
+
+void Deslauriers_Dubuc_13_7_transform_H_inplace_avx2_s2(void *idata,
+                                                         const int istride,
+                                                         const int width,
+                                                         const int height,
+                                                         const int depth) {
+  dd13h_transform_inplace_avx2<2>(idata, istride, width, height, depth);
+}
+
+void Deslauriers_Dubuc_13_7_transform_H_inplace_avx2_s4(void *idata,
+                                                         const int istride,
+                                                         const int width,
+                                                         const int height,
+                                                         const int depth) {
+  dd13h_transform_inplace_avx2<4>(idata, istride, width, height, depth);
+}
+
 // ---------------------------------------------------------------------------
 // Strided forward vertical kernels for the coarser levels (skip 2 and 4).
 
