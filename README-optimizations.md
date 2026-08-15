@@ -1,8 +1,11 @@
 # optimizations
 
-The **mainline CPU-performance** branch. It takes the `main` baseline and
-applies a sequence of byte-identical SIMD (SSE4.2 / AVX2) optimisations to the
-VC-2 HQ encoder and decoder, one reviewable commit per round.
+The **mainline CPU-performance and experimental research** branch. It takes
+the `main` baseline and applies a sequence of byte-identical SIMD (SSE4.2 /
+AVX2) optimisations to the VC-2 HQ encoder and decoder, one reviewable commit
+per round. The former `bold-experiments` branch has been folded into this one;
+successful and rejected high-risk experiments now share a single history and
+README.
 
 ## Why this branch exists
 
@@ -10,6 +13,9 @@ VC-2 HQ encoder and decoder, one reviewable commit per round.
   round is verified against the reference before landing.
 - It is the branch the `cuda-implementation` work periodically merges from, so
   the GPU work always builds on the latest CPU state.
+- It is also the playground for aggressive ideas such as breaking serial
+  lifting recurrences into two-pass stencils. Candidates still have to remain
+  byte-identical and beat the baseline under repeated measurement.
 
 ## What was done (Rounds 1-14)
 
@@ -42,7 +48,33 @@ Encoder:
 Every change is byte-identical (SHA-256 of stream and pixels) and the 6/6
 native CTest targets stay green.
 
+## Notable rejected experiments
+
+- SSE4.2 DD final-horizontal transform: the stage was memory-bound and the
+  SIMD implementation was slower than scalar.
+- matched-length VLC stream grouping: the additional grouping work did not
+  recover enough lookup-chain latency.
+
+Rejected experiments are reverted and recorded in the optimization profile so
+future research loops receive them as negative examples.
+
+## Automated research loop
+
+`autoresearch/` implements an AlphaEvolve-style evolutionary optimization
+loop. It keeps a scored program database, samples across subsystem islands,
+generates targeted SEARCH/REPLACE mutations, evaluates candidates in isolated
+Git worktrees, and promotes only byte-identical latency improvements. See
+`autoresearch/README.md` and start with:
+
+```powershell
+py -3 .\autoresearch\run.py `
+  --config .\autoresearch\config.optimizations.json `
+  baseline --tier full
+```
+
 ## Documentation
 
 - `profiles/OPTIMIZATION-PROFILE.md` — per-round analysis, measurements, and
   the rejected experiments (with the reasons they were rejected).
+- `autoresearch/README.md` — evolutionary search setup, evaluator cascade,
+  proposer interface, and promotion rules.
