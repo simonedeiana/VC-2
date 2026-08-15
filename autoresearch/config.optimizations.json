@@ -1,0 +1,63 @@
+{
+  "name": "optimizations",
+  "branch": "optimizations",
+  "build": {
+    "directory": "build-autoresearch",
+    "cuda": false
+  },
+  "evaluation": {
+    "width": 1920,
+    "height": 1080,
+    "wavelets": [
+      "haar0",
+      "deslauriers-debuc-9-7",
+      "deslauriers-debuc-13-7"
+    ],
+    "smoke_wavelets": [
+      "haar0",
+      "deslauriers-debuc-9-7",
+      "deslauriers-debuc-13-7"
+    ],
+    "variants": [
+      {
+        "name": "cpu",
+        "environment": {}
+      }
+    ],
+    "tiers": {
+      "smoke": {
+        "frames": 1,
+        "runs": 1,
+        "validator": false
+      },
+      "quick": {
+        "frames": 8,
+        "runs": 3,
+        "validator": false
+      },
+      "full": {
+        "frames": 30,
+        "runs": 9,
+        "validator": true
+      }
+    }
+  },
+  "search": {
+    "background": "BACKGROUND-CPU.md",
+    "islands": [
+      "encoder-transform",
+      "encoder-entropy",
+      "decoder-transform",
+      "decoder-entropy",
+      "memory-layout",
+      "pipeline-scheduling"
+    ],
+    "max_parallel": 2,
+    "minimum_gain_percent": 0.5,
+    "regression_tolerance_percent": 0.5
+  },
+  "proposer": {
+    "command": [],
+    "timeout_seconds": 1800
+  }
+}

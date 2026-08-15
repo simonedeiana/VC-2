@@ -8,9 +8,11 @@
 /build-profile/
 /build-lto/
 /build-cuda/
+/build-autoresearch/
 /build/
 /artifacts/
 /out/
+/.autoresearch/
 
 # Visual Studio workspace state.
 /.vs/

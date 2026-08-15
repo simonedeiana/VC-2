@@ -1,0 +1,67 @@
+{
+  "name": "cuda-implementation",
+  "branch": "cuda-implementation",
+  "build": {
+    "directory": "build-autoresearch",
+    "cuda": true
+  },
+  "evaluation": {
+    "width": 1920,
+    "height": 1080,
+    "wavelets": [
+      "haar0"
+    ],
+    "smoke_wavelets": [
+      "haar0"
+    ],
+    "variants": [
+      {
+        "name": "cuda",
+        "environment": {
+          "VC2HQ_CUDA": "1"
+        }
+      },
+      {
+        "name": "cpu",
+        "environment": {
+          "VC2HQ_CUDA": "0"
+        }
+      }
+    ],
+    "tiers": {
+      "smoke": {
+        "frames": 1,
+        "runs": 1,
+        "validator": false
+      },
+      "quick": {
+        "frames": 8,
+        "runs": 3,
+        "validator": false
+      },
+      "full": {
+        "frames": 30,
+        "runs": 9,
+        "validator": true
+      }
+    }
+  },
+  "search": {
+    "background": "BACKGROUND-CUDA.md",
+    "islands": [
+      "encoder-transform",
+      "encoder-selector",
+      "encoder-transfer",
+      "decoder-transform",
+      "decoder-transfer",
+      "cpu-gpu-scheduling"
+    ],
+    "max_parallel": 1,
+    "minimum_gain_percent": 0.75,
+    "regression_tolerance_percent": 0.5
+  },
+  "proposer": {
+    "command": [],
+    "timeout_seconds": 1800
+  }
+}
