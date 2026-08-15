@@ -46,6 +46,24 @@ Integration:
 - CUDA encoder and decoder run on a GeForce GTX 1050 Ti (sm_61); byte-identical
   output is preserved when the GPU path is disabled.
 
+## Automated research loop
+
+The shared `autoresearch/` framework runs an AlphaEvolve-style search over GPU
+kernels, transfers, launch amortization, and CPU/GPU scheduling. The CUDA
+configuration builds with `VC2_ENABLE_CUDA=ON`, benchmarks both
+`VC2HQ_CUDA=1` and `VC2HQ_CUDA=0`, and requires exact stream/pixel hashes for
+both variants before a candidate can enter the program database.
+
+```powershell
+py -3 .\autoresearch\run.py `
+  --config .\autoresearch\config.cuda.json `
+  baseline --tier full
+```
+
+See `autoresearch/README.md` for the proposer interface, evaluation cascade,
+island selection, and safe promotion workflow.
+
 ## Documentation
 
 - `CUDA.md`, `profiles/CUDA-DECODER.md`, `profiles/CUDA-LOW-LATENCY.md`.
+- `autoresearch/README.md` and `autoresearch/BACKGROUND-CUDA.md`.
