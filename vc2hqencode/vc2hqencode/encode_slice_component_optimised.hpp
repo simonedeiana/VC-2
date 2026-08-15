@@ -323,17 +323,28 @@ static const uint16_t SCAN_POS_32x8[256] = {
   184,248,185,249,186,250,187,251,188,252,189,253,190,254,191,255
 };
 
+static const uint16_t SCAN_POS_16x8[128] = {
+  0,32,8,33,2,34,9,35,1,36,10,37,3,38,11,39,
+  64,96,65,97,66,98,67,99,68,100,69,101,70,102,71,103,
+  16,40,24,41,17,42,25,43,18,44,26,45,19,46,27,47,
+  72,104,73,105,74,106,75,107,76,108,77,109,78,110,79,111,
+  4,48,12,49,6,50,13,51,5,52,14,53,7,54,15,55,
+  80,112,81,113,82,114,83,115,84,116,85,117,86,118,87,119,
+  20,56,28,57,21,58,29,59,22,60,30,61,23,62,31,63,
+  88,120,89,121,90,122,91,123,92,124,93,125,94,126,95,127
+};
+
 // AVX2 quantize+encode of a full 32x8x3 slice component: 8 samples per
 // iteration with the quantisation (mulhi) and the merged codeword/length
 // table lookup (gather) vectorized. Codewords scatter into stack buffers (in
 // scan order), then pack directly into slice->packed[c] so the serialiser
 // memcpy's the bits instead of re-reading the codeword/wordlength arrays.
-static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice, int c,
-                                                       const uint16_t *m, const uint8_t *sh,
-                                                       uint8_t qshift) {
+template<int W> static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice, int c,
+                                                                       const uint16_t *m, const uint8_t *sh,
+                                                                       uint8_t qshift) {
   const int istride = slice->istride[c];
-  uint16_t cwbuf[256];
-  uint8_t  lnbuf[256];
+  uint16_t cwbuf[W * 8];
+  uint8_t  lnbuf[W * 8];
   int length = 0;
   int samples = -1;
   const __m256i ZERO256 = _mm256_setzero_si256();
@@ -343,11 +354,11 @@ static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice
 
   for (int r = 0; r < 8; r++) {
     const int16_t *in = &slice->idata[c][r * istride];
-    const uint16_t *mr = m + r * 32;
-    const uint8_t *shr = sh + r * 32;
-    const uint16_t *scanr = SCAN_POS_32x8 + r * 32;
+    const uint16_t *mr = m + r * W;
+    const uint8_t *shr = sh + r * W;
+    const uint16_t *scanr = (W == 32 ? SCAN_POS_32x8 : SCAN_POS_16x8) + r * W;
 
-    for (int k = 0; k < 32; k += 8) {
+    for (int k = 0; k < W; k += 8) {
       const __m128i x = _mm_loadu_si128((const __m128i *)(in + k));
       const __m128i ax = _mm_abs_epi16(x);
       const __m128i mv = _mm_loadu_si128((const __m128i *)(mr + k));
@@ -393,7 +404,7 @@ static inline void encode_slice_component_32x8x3_avx2(CodedSlice<int16_t> *slice
     }
   }
 
-  length -= (255 - samples);
+  length -= (W * 8 - 1 - samples);
   slice->length[c] = (length + 7) / 8;
   slice->samples[c] = samples + 1;
   bitpack_pack(slice->packed[c], cwbuf, lnbuf, samples + 1);
@@ -417,7 +428,7 @@ template<> inline void encode_slice_component<32,8,3, int16_t>(CodedSlice<int16_
   const uint8_t *sh = matrices->sh(qindex, c);
 
   if (encode_has_avx2()) {
-    encode_slice_component_32x8x3_avx2(slice, c, m, sh, qshift);
+    encode_slice_component_32x8x3_avx2<32>(slice, c, m, sh, qshift);
     return;
   }
 
@@ -681,4 +692,18 @@ template<> inline void encode_slice_component<32,8,3, int16_t>(CodedSlice<int16_
   length -= (SAMPLES_PER_SLICE - 1) - samples;
   slice->length[c] = (length + 7)/8;
   slice->samples[c] = samples + 1;
+}
+
+template<> inline void encode_slice_component<16,8,3, int16_t>(CodedSlice<int16_t> *slice, int c, QuantisationMatrices *matrices) {
+  const int qindex = (slice->qindex <= 31)?(slice->qindex):(28 + (slice->qindex%4));
+  const uint8_t qshift = (slice->qindex <= 31)?(0):((slice->qindex/4) - 7);
+  const uint16_t *m = matrices->m(qindex, c);
+  const uint8_t *sh = matrices->sh(qindex, c);
+
+  if (encode_has_avx2()) {
+    encode_slice_component_32x8x3_avx2<16>(slice, c, m, sh, qshift);
+    return;
+  }
+
+  encode_slice_component_fallback<int16_t>(slice, c, matrices, 16, 8, 3);
 }
