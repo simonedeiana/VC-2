@@ -28,6 +28,13 @@ static inline __m256i dd13_predict(const __m256i xm3, const __m256i xm1,
 void Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_int16_t(
     void *_idata, const int istride, const int width, const int height);
 
+void Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s2(
+    void *idata, const int istride, const int width, const int height);
+void Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s4(
+    void *idata, const int istride, const int width, const int height);
+void Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s8(
+    void *idata, const int istride, const int width, const int height);
+
 // Deslauriers-Dubuc 13/7 inverse horizontal final transform, full frame.
 // Same two-pass parallel scheme as the DD9/7 version: pass 1 computes the
 // compact even D vector (13/7 predict) into a per-row stack scratch; pass 2

@@ -49,6 +49,13 @@ static inline __m256i dd9_update(const __m256i dm6, const __m256i dm4,
 void Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_int16_t(
     void *_idata, const int istride, const int width, const int height);
 
+void Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s2(
+    void *idata, const int istride, const int width, const int height);
+void Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s4(
+    void *idata, const int istride, const int width, const int height);
+void Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s8(
+    void *idata, const int istride, const int width, const int height);
+
 // Deslauriers-Dubuc 9/7 inverse horizontal final transform, full frame.
 //
 // The scalar recurrence along x is actually a parallel column stencil: the

@@ -1,9 +1,8 @@
 /*****************************************************************************
  * invtransform_avx2.cpp : Inverse transform dispatch: AVX2 version
  *****************************************************************************
- * Only the DD9/7 and DD13/7 finest-level inverse vertical kernels have AVX2
- * implementations; everything else falls back to the SSE4.2 dispatch (which
- * in turn falls back to scalar).
+ * DD9/7 and DD13/7 inverse vertical kernels use AVX2 at all supported
+ * decomposition strides; everything else falls back to the SSE4.2 dispatch.
  *****************************************************************************/
 
 #include "invtransform_avx2.hpp"
@@ -17,12 +16,28 @@ InplaceTransform get_invvtransform_avx2(int wavelet_index, int level, int depth,
   if (sample_size == 2) {
     switch (wavelet_index) {
     case VC2DECODER_WFT_DESLAURIERS_DUBUC_9_7:
-      if (depth - level - 1 == 0)
+      switch (depth - level - 1) {
+      case 0:
         return Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_int16_t;
+      case 1:
+        return Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s2;
+      case 2:
+        return Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s4;
+      case 3:
+        return Deslauriers_Dubuc_9_7_invtransform_V_inplace_avx2_s8;
+      }
       break;
     case VC2DECODER_WFT_DESLAURIERS_DUBUC_13_7:
-      if (depth - level - 1 == 0)
+      switch (depth - level - 1) {
+      case 0:
         return Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_int16_t;
+      case 1:
+        return Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s2;
+      case 2:
+        return Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s4;
+      case 3:
+        return Deslauriers_Dubuc_13_7_invtransform_V_inplace_avx2_s8;
+      }
       break;
     default:
       break;
