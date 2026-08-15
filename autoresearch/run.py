@@ -178,7 +178,7 @@ def record_baseline(root: Path, config: dict[str, Any], tier: str, database: Pro
         result=result,
     )
     for island in config["search"].get("islands", ["default"]):
-        database.update_elite(config["branch"], island, program_id)
+        database.update_elite(config["branch"], f"{tier}:{island}", program_id)
     return database.get(program_id)
 
 
@@ -337,7 +337,7 @@ def main() -> int:
             raise RuntimeError(
                 "no proposer configured; set proposer.command in the config or pass --proposer-command"
             )
-        if database.latest_baseline(config["branch"]) is None:
+        if database.latest_baseline(config["branch"], args.tier) is None:
             record_baseline(root, config, args.tier, database)
         rng = random.Random(args.seed)
         workers = args.parallel or int(config["search"].get("max_parallel", 2))
@@ -347,7 +347,7 @@ def main() -> int:
             jobs = []
             islands = config["search"].get("islands", ["default"])
             for index in range(args.candidates):
-                parent = database.sample_parent(config["branch"], rng)
+                parent = database.sample_parent(config["branch"], rng, args.tier)
                 inspirations = database.inspirations(config["branch"], limit=4)
                 jobs.append((parent, inspirations, islands[index % len(islands)]))
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -382,7 +382,12 @@ def main() -> int:
                         result=candidate["result"],
                     )
                     if candidate["status"] == "accepted":
-                        database.update_elite(config["branch"], candidate["island"], candidate["id"])
+                        result_tier = candidate["result"].get("tier", args.tier)
+                        database.update_elite(
+                            config["branch"],
+                            f"{result_tier}:{candidate['island']}",
+                            candidate["id"],
+                        )
                         accepted.append(candidate)
                     print(json.dumps(candidate, indent=2, sort_keys=True))
         if args.promote and accepted:

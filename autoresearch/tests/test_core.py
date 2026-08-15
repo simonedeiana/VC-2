@@ -108,7 +108,12 @@ class DatabaseTests(unittest.TestCase):
     def test_program_and_elite_roundtrip(self):
         with tempfile.TemporaryDirectory() as directory:
             database = ProgramDatabase(Path(directory) / "programs.sqlite3")
-            result = {"valid": True, "metrics": {"encoder_fps": 10.0}, "hashes": {}}
+            result = {
+                "valid": True,
+                "tier": "quick",
+                "metrics": {"encoder_fps": 10.0},
+                "hashes": {},
+            }
             database.add(
                 program_id="baseline",
                 branch="optimizations",
@@ -122,7 +127,11 @@ class DatabaseTests(unittest.TestCase):
                 result=result,
             )
             self.assertTrue(database.update_elite("optimizations", "encoder-transform", "baseline"))
-            self.assertEqual(database.sample_parent("optimizations", __import__("random").Random(0))["id"], "baseline")
+            self.assertEqual(
+                database.sample_parent("optimizations", __import__("random").Random(0), "quick")["id"],
+                "baseline",
+            )
+            self.assertIsNone(database.latest_baseline("optimizations", "full"))
             database.close()
 
 
