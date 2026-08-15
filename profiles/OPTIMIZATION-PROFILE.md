@@ -1032,3 +1032,43 @@ measured substage of the end-to-end run.
 The next encoder targets are the remaining forward transform levels and
 input/vertical work, followed by decoder-side profiling and any residual
 quantise/pack costs.
+
+---
+
+# Round 17 — AVX2 DD9/DD13 10P2 input horizontal kernels
+
+## Change
+
+The DD9/7 and DD13/7 10P2 input horizontal transforms now process eight
+even/odd sample pairs at a time with AVX2 int32 lifting arithmetic. The
+existing four-lane implementation remains the fallback for widths that are
+only multiples of eight, narrow rows, and short heights, preserving the prior
+non-standard geometry behavior. The AVX2 path keeps the scalar boundary
+mirrors and output overlap copy unchanged.
+
+## Result
+
+Fifteen interleaved profile pairs on the current head produced these medians:
+
+| Workload | Input horizontal before | Input horizontal after | Total worker before | Total worker after |
+|---|---:|---:|---:|---:|
+| DD9/7 | 103.604ms | 91.916ms (**-11.3%**) | 720.759ms | 710.841ms (**-1.4%**) |
+| DD13/7 | 130.915ms | 110.926ms (**-15.3%**) | 768.053ms | 746.627ms (**-2.8%**) |
+
+The full-tier benchmark remained noisy, but the stage-level reductions were
+consistent across the paired runs and the end-to-end worker medians improved
+for both DD workloads.
+
+## Verification
+
+- Candidate full tier passed six native tests, three validated streams, and
+  all pixel/stream hash gates.
+- Post-promotion smoke and quick tiers passed; the quick tier remained clean
+  with six native tests and identical hashes.
+- The change was promoted as commit `b138c52`.
+
+## Research follow-up
+
+Remaining encoder work is concentrated in vertical wavelet/input memory
+traffic and quantiser-search. Decoder-side profiling is the next separate
+frontier once the remaining encoder transform opportunities are measured.
