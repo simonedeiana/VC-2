@@ -106,6 +106,18 @@ the inverse transform is slice-local. The backend therefore:
   ~2.5%, confirming the VLC kernel is bound by the dependent LUT-load chain,
   not by the stores.
 
+## Autoresearch: VLC launch width
+
+On 2026-08-15 the first VLC kernel's block width was increased from 128 to
+256 threads. The change keeps one lane per independent component stream and
+does not alter the decode algorithm or output staging. In matched full-tier
+runs on the same GTX 1050 Ti, the clean 128-thread control measured 89.729
+fps for CUDA Haar-0 decode; the 256-thread candidate measured 90.655 fps and
+91.416 fps in two subsequent nine-sample runs (+1.0% and +1.9%). CPU fallback
+throughput stayed within normal run-to-run variance. Both runs passed the six
+native tests, exact CPU/CUDA stream and pixel hashes, and both conformance
+validator streams.
+
 ## Verification
 
 - Full MSVC/CUDA Release build succeeds; all six CTest targets pass.
