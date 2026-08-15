@@ -30,7 +30,7 @@
     ],
     "tiers": {
       "smoke": {
-        "frames": 1,
+        "frames": 4,
         "runs": 1,
         "validator": false
       },
