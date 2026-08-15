@@ -216,6 +216,37 @@ static inline __m128i dd13h_predict13(__m128i a, __m128i b, __m128i c, __m128i d
   return _mm_srai_epi32(_mm_add_epi32(v, _mm_set1_epi32(16)), 5);
 }
 
+static inline __m256i dd13i_update8(__m256i a, __m256i b, __m256i c, __m256i d) {
+  __m256i nb = _mm256_add_epi32(b, _mm256_slli_epi32(b, 3));
+  __m256i nc = _mm256_add_epi32(c, _mm256_slli_epi32(c, 3));
+  __m256i v = _mm256_sub_epi32(_mm256_setzero_si256(), a);
+  v = _mm256_add_epi32(v, nb);
+  v = _mm256_add_epi32(v, nc);
+  v = _mm256_sub_epi32(v, d);
+  return _mm256_srai_epi32(_mm256_add_epi32(v, _mm256_set1_epi32(8)), 4);
+}
+
+static inline __m256i dd13i_predict13_8(__m256i a, __m256i b, __m256i c, __m256i d) {
+  __m256i nb = _mm256_add_epi32(b, _mm256_slli_epi32(b, 3));
+  __m256i nc = _mm256_add_epi32(c, _mm256_slli_epi32(c, 3));
+  __m256i v = _mm256_sub_epi32(_mm256_setzero_si256(), a);
+  v = _mm256_add_epi32(v, nb);
+  v = _mm256_add_epi32(v, nc);
+  v = _mm256_sub_epi32(v, d);
+  return _mm256_srai_epi32(_mm256_add_epi32(v, _mm256_set1_epi32(16)), 5);
+}
+
+static inline void dd13i_store8(int16_t *p, __m256i even, __m256i odd, __m128i lo16) {
+  const __m256i pair_lo = _mm256_unpacklo_epi32(even, odd);
+  const __m256i pair_hi = _mm256_unpackhi_epi32(even, odd);
+  const __m128i lo0 = _mm_shuffle_epi8(_mm256_castsi256_si128(pair_lo), lo16);
+  const __m128i lo1 = _mm_shuffle_epi8(_mm256_castsi256_si128(pair_hi), lo16);
+  const __m128i hi0 = _mm_shuffle_epi8(_mm256_extracti128_si256(pair_lo, 1), lo16);
+  const __m128i hi1 = _mm_shuffle_epi8(_mm256_extracti128_si256(pair_hi, 1), lo16);
+  _mm_storeu_si128((__m128i *)p, _mm_unpacklo_epi64(lo0, lo1));
+  _mm_storeu_si128((__m128i *)(p + 8), _mm_unpacklo_epi64(hi0, hi1));
+}
+
 void Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2(const char *_idata,
                                                           const int istride,
                                                           void **_odata,
@@ -224,6 +255,86 @@ void Deslauriers_Dubuc_13_7_transform_H_inplace_10P2_avx2(const char *_idata,
                                                           const int iheight,
                                                           const int owidth,
                                                           const int oheight) {
+  // Eight even samples fit in one AVX2 vector for the standard 1920/960-wide
+  // inputs. Retain the existing four-lane implementation for widths that are
+  // only multiples of eight, preserving its established geometry behavior.
+  if (iwidth >= 16 && (iwidth & 15) == 0 && iheight >= 8) {
+    const uint16_t *idata = (const uint16_t *)_idata;
+    int16_t *odata = *(int16_t **)_odata;
+    const int nE = iwidth / 2;
+    int32_t *even32 = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+    int32_t *odd32  = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+    int32_t *Oscr   = (int32_t *)_alloca((nE + 4) * sizeof(int32_t));
+    int32_t *e = even32 + 2;
+    int32_t *o = odd32 + 2;
+    int32_t *Op = Oscr + 2;
+
+    const __m128i EVEN = _mm_setr_epi8(0,1, 4,5, 8,9, 12,13, -1,-1,-1,-1,-1,-1,-1,-1);
+    const __m128i ODD  = _mm_setr_epi8(2,3, 6,7, 10,11, 14,15, -1,-1,-1,-1,-1,-1,-1,-1);
+    const __m128i LO16 = EVEN;
+    const __m128i M512 = _mm_set1_epi32(512);
+
+    for (int y = 0; y < iheight; y++) {
+      const uint16_t *row = idata + (size_t)y * istride;
+      int16_t *orow = odata + (size_t)y * ostride;
+
+      for (int j = 0; j < nE; j += 8) {
+        const uint16_t *pair = row + 2 * j;
+        const __m128i s0 = _mm_loadu_si128((const __m128i *)pair);
+        const __m128i s1 = _mm_loadu_si128((const __m128i *)(pair + 8));
+        __m128i e0 = _mm_slli_epi32(_mm_sub_epi32(_mm_cvtepu16_epi32(_mm_shuffle_epi8(s0, EVEN)), M512), 1);
+        __m128i e1 = _mm_slli_epi32(_mm_sub_epi32(_mm_cvtepu16_epi32(_mm_shuffle_epi8(s1, EVEN)), M512), 1);
+        __m128i o0 = _mm_slli_epi32(_mm_sub_epi32(_mm_cvtepu16_epi32(_mm_shuffle_epi8(s0, ODD)), M512), 1);
+        __m128i o1 = _mm_slli_epi32(_mm_sub_epi32(_mm_cvtepu16_epi32(_mm_shuffle_epi8(s1, ODD)), M512), 1);
+        __m256i ev = _mm256_inserti128_si256(_mm256_castsi128_si256(e0), e1, 1);
+        __m256i od = _mm256_inserti128_si256(_mm256_castsi128_si256(o0), o1, 1);
+        _mm256_storeu_si256((__m256i *)(e + j), ev);
+        _mm256_storeu_si256((__m256i *)(o + j), od);
+      }
+
+      e[-1] = e[0];
+      e[-2] = e[0];
+      e[nE] = e[nE - 1];
+      e[nE + 1] = e[nE - 2];
+
+      for (int j0 = 0; j0 < nE; j0 += 8) {
+        const __m256i d_lo = _mm256_loadu_si256((const __m256i *)(e + j0 - 2));
+        const __m256i d_hi = _mm256_loadu_si256((const __m256i *)(e + j0 + 2));
+        const __m256i s1 = _mm256_alignr_epi8(d_hi, d_lo, 4);
+        const __m256i s2 = _mm256_alignr_epi8(d_hi, d_lo, 8);
+        const __m256i s3 = _mm256_alignr_epi8(d_hi, d_lo, 12);
+        const __m256i odd = _mm256_loadu_si256((const __m256i *)(o + j0));
+        _mm256_storeu_si256((__m256i *)(Op + j0), _mm256_sub_epi32(odd, dd13i_update8(s1, s2, s3, d_hi)));
+      }
+      Op[-2] = Op[1];
+      Op[-1] = Op[0];
+      Op[nE] = Op[nE - 1];
+
+      for (int j0 = 0; j0 < nE; j0 += 8) {
+        const __m256i ev = _mm256_loadu_si256((const __m256i *)(e + j0));
+        const __m256i o_lo = _mm256_loadu_si256((const __m256i *)(Op + j0 - 2));
+        const __m256i o_hi = _mm256_loadu_si256((const __m256i *)(Op + j0 + 2));
+        const __m256i w0 = o_lo;
+        const __m256i w1 = _mm256_alignr_epi8(o_hi, o_lo, 4);
+        const __m256i w2 = _mm256_alignr_epi8(o_hi, o_lo, 8);
+        const __m256i w3 = _mm256_alignr_epi8(o_hi, o_lo, 12);
+        const __m256i cur = _mm256_loadu_si256((const __m256i *)(Op + j0));
+        dd13i_store8(orow + 2 * j0, _mm256_add_epi32(ev, dd13i_predict13_8(w0, w1, w2, w3)), cur, LO16);
+      }
+    }
+
+    for (int y = 0; y < iheight; y++) {
+      for (int x = iwidth; x < owidth; x += 2) {
+        odata[y * ostride + x + 0] = odata[y * ostride + (2 * iwidth - x - 2) + 0];
+        odata[y * ostride + x + 1] = odata[y * ostride + (2 * iwidth - x - 2) + 1];
+      }
+    }
+    for (int y = iheight; y < oheight; y++) {
+      memcpy(&odata[y * ostride], &odata[(2 * iheight - y - 1) * ostride], owidth);
+    }
+    return;
+  }
+
   if (iwidth < 16 || (iwidth & 7) != 0 || iheight < 8) {
     Deslauriers_Dubuc_13_7_transform_H_inplace_10P2<int16_t>(
       _idata, istride, _odata, ostride, iwidth, iheight, owidth, oheight);
