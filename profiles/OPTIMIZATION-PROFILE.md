@@ -1072,3 +1072,47 @@ for both DD workloads.
 Remaining encoder work is concentrated in vertical wavelet/input memory
 traffic and quantiser-search. Decoder-side profiling is the next separate
 frontier once the remaining encoder transform opportunities are measured.
+
+---
+
+# Round 18 — AVX2 DD9/DD13 coarser inverse vertical levels
+
+## Change
+
+The DD9/7 and DD13/7 inverse vertical transforms now use eight-lane AVX2
+lifting kernels at decomposition strides 2, 4, and 8. Gather loads preserve
+the interleaved column geometry and scalar lane stores preserve the existing
+sample narrowing behavior. Dispatch selects the matching kernel for levels
+1 through 3; unsupported widths and short planes retain the scalar fallback.
+
+## Result
+
+The candidate was compared with a clean full-tier run of the immediately
+preceding `ceaf5bb` head, then repeated after the focused profile. Nine-run
+medians were:
+
+| Workload | Clean baseline | AVX2 coarser V | Improvement |
+|---|---:|---:|---:|
+| DD9/7 decoder | 54.446 fps | 61.983 fps | **+13.8%** |
+| DD13/7 decoder | 50.082 fps | 56.075 fps | **+12.0%** |
+| Haar0 decoder | 98.041 fps | 97.720 fps | -0.3% |
+
+The repeated candidate kept encoder medians within 0.14% of the clean
+baseline. Focused alternating profiles also showed the inverse-vertical
+stage falling by roughly 30% for both DD workloads.
+
+## Verification
+
+- The candidate full tier passed six native tests and three conformance
+  validators.
+- Haar0, DD9/7, and DD13/7 stream and decoded-pixel hashes remained exactly
+  unchanged.
+- A repeat full tier reproduced the decoder gains and kept the non-target
+  encoder metrics effectively flat.
+- The change was promoted as commit `eabed91`.
+
+## Research follow-up
+
+Decoder inverse-vertical is no longer the dominant DD stage. The next decoder
+targets are inverse-horizontal and final output, while the encoder-side
+quantiser-search and remaining transform memory traffic remain open.
