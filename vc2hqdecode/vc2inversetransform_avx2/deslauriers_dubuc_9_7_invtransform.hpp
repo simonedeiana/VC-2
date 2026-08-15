@@ -137,7 +137,52 @@ static inline void Deslauriers_Dubuc_9_7_invtransform_H_final_1_avx2_int16_t(
     D[nD + 1] = D[nD - 2];
 
     // ---- pass 2: outputs over the valid crop, with streaming stores ----
-    for (int p0 = ooffset_x; p0 + 8 <= ooffset_x + owidth; p0 += 8) {
+    // Process two adjacent 8-pixel groups together. The compact D samples
+    // needed by both groups are contiguous, so the 256-bit path avoids the
+    // per-group 128-bit window setup while preserving the same recurrence.
+    const __m256i ODD256 = _mm256_setr_epi8(
+      2,3, 6,7, 10,11, 14,15, -1,-1,-1,-1,-1,-1,-1,-1,
+      2,3, 6,7, 10,11, 14,15, -1,-1,-1,-1,-1,-1,-1,-1);
+    const __m256i EIGHT256 = _mm256_set1_epi32(8);
+    const __m256i OFFSET256 = _mm256_set1_epi32(offset);
+    const __m256i CLIP256 = _mm256_set1_epi32(clip);
+    int p0 = ooffset_x;
+    for (; p0 + 16 <= ooffset_x + owidth; p0 += 16) {
+      const int j0 = p0 / 2;
+      const __m256i S1 = _mm256_loadu_si256((const __m256i *)(D + j0 - 1));
+      const __m256i E = _mm256_loadu_si256((const __m256i *)(D + j0));
+      const __m256i S3 = _mm256_loadu_si256((const __m256i *)(D + j0 + 1));
+      const __m256i Dhi = _mm256_loadu_si256((const __m256i *)(D + j0 + 2));
+      const __m256i nine_E = _mm256_add_epi32(E, _mm256_slli_epi32(E, 3));
+      const __m256i nine_S3 = _mm256_add_epi32(S3, _mm256_slli_epi32(S3, 3));
+      __m256i UPD = _mm256_sub_epi32(_mm256_setzero_si256(), S1);
+      UPD = _mm256_add_epi32(UPD, nine_E);
+      UPD = _mm256_add_epi32(UPD, nine_S3);
+      UPD = _mm256_sub_epi32(UPD, Dhi);
+      UPD = _mm256_srai_epi32(_mm256_add_epi32(UPD, EIGHT256), 4);
+
+      const __m256i xs = _mm256_loadu_si256((const __m256i *)(row + p0));
+      const __m256i odd_shuffled = _mm256_shuffle_epi8(xs, ODD256);
+      const __m128i odd16 = _mm_unpacklo_epi64(
+          _mm256_castsi256_si128(odd_shuffled),
+          _mm256_extracti128_si256(odd_shuffled, 1));
+      const __m256i O = _mm256_add_epi32(_mm256_cvtepi16_epi32(odd16), UPD);
+
+      __m256i OUT_lo = _mm256_unpacklo_epi32(E, O);
+      __m256i OUT_hi = _mm256_unpackhi_epi32(E, O);
+      OUT_lo = _mm256_min_epi32(_mm256_max_epi32(
+          _mm256_add_epi32(_mm256_srai_epi32(OUT_lo, 1), OFFSET256),
+          _mm256_setzero_si256()), CLIP256);
+      OUT_hi = _mm256_min_epi32(_mm256_max_epi32(
+          _mm256_add_epi32(_mm256_srai_epi32(OUT_hi, 1), OFFSET256),
+          _mm256_setzero_si256()), CLIP256);
+      const __m256i packed = _mm256_packus_epi32(OUT_lo, OUT_hi);
+      _mm_stream_si128((__m128i *)(orow + p0 - ooffset_x),
+                       _mm256_castsi256_si128(packed));
+      _mm_stream_si128((__m128i *)(orow + p0 - ooffset_x + 8),
+                       _mm256_extracti128_si256(packed, 1));
+    }
+    for (; p0 + 8 <= ooffset_x + owidth; p0 += 8) {
       const int j0 = p0 / 2;
       const __m128i d_lo = _mm_loadu_si128((const __m128i *)(D + j0 - 2));
       const __m128i d_hi = _mm_loadu_si128((const __m128i *)(D + j0 + 2));
