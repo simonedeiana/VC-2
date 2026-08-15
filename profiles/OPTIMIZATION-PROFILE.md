@@ -996,3 +996,39 @@ DD13/7. The change was promoted as commit `0c96986`.
 The fastest-mode encoder now uses the AVX2 quantise+pack path for all three
 components of the standard 32x8x3 slice. Remaining work should focus on the
 DD L1+ forward horizontal transforms and any decoder-side bottlenecks.
+
+---
+
+# Round 16 — AVX2 DD9/DD13 forward horizontal levels
+
+## Change
+
+The DD9/7 and DD13/7 forward horizontal levels 1 and 2 (skip 2 and 4) now
+use AVX2 eight-lane int32 lifting kernels with scratch buffers for the even,
+odd, and intermediate prediction samples. The skip-2 path uses SIMD stride-4
+deinterleaving; non-conforming widths and narrow rows retain the scalar
+implementation. Dispatch is enabled for both transform families while the
+existing scalar fallback remains available for other levels and platforms.
+
+## Result
+
+Fifteen interleaved profile pairs on DD13/7 showed the horizontal stage median
+fall from 60.359ms to 44.677ms (**-26.0%**) and total worker time median fall
+from 768.609ms to 754.808ms (**-1.8%**). Wall-clock encoder A/B runs were
+noisy: the first pair improved 35.582 to 37.117 fps (+4.3%), while the repeat
+was effectively flat at 37.366 to 37.096 fps. The stage-level and worker-time
+profiles provide the stronger signal because the horizontal kernel is a
+measured substage of the end-to-end run.
+
+## Verification
+
+- Post-promotion quick tier passed with all six native tests.
+- Haar0, DD9/7, and DD13/7 pixel and stream hashes remained byte-identical.
+- The candidate full tier passed six native tests and three validated streams.
+- The change was promoted as commit `aa22c62`.
+
+## Research follow-up
+
+The next encoder targets are the remaining forward transform levels and
+input/vertical work, followed by decoder-side profiling and any residual
+quantise/pack costs.
