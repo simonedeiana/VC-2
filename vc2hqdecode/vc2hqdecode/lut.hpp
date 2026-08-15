@@ -34,7 +34,7 @@ const uint8_t STATE_FOLLOW = 1;
 const uint8_t STATE_DATA   = 2;
 const uint8_t STATE_SIGN   = 3;
 
-ALIGNED(32) struct LUTEntry {
+ALIGNED(16) struct LUTEntry {
     uint8_t state;
     uint8_t preshift;
     int8_t  sgn;
