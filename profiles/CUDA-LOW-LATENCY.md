@@ -89,6 +89,31 @@ transfers already exceed 2 ms on this GPU before application overhead.
 - Packing the (multiplier, shift) matrix pair into one uint32 and reading one
   packed word instead of two arrays was neutral and was reverted.
 
+## Autoresearch follow-up: CUDA encoder
+
+On 2026-08-16, the current CUDA branch was re-established at a matched full
+baseline of 212.874 encoder fps on the GTX 1050 Ti. The following isolated
+encoder candidates all passed the native tests and, where applicable, exact
+CPU/CUDA stream and pixel validation, but were rejected on the smoke tier:
+
+| Candidate | CUDA encoder fps |
+|---|---:|
+| Synchronous budget upload | 112.120 |
+| Budget/offset layout cache | 169.551 |
+| Contiguous input-copy fast path | 161.143 |
+| Vectorized serializer output stores | 155.104 |
+| 128-thread serializer | 167.056 |
+| 512-thread serializer | 105.464 |
+| Pair-loaded Haar input | 166.856 |
+| Serializer launch bounds | 126.561 |
+
+A read-only host-registration hint was also rejected because it changed both
+the CUDA stream and pixel hashes. No source candidate from this round is
+retained. The measurements reinforce the existing profiler conclusion: on
+this Pascal/WDDM system, a persistent-kernel or GPU-native surface design is
+needed for a credible next encoder gain; launch and transfer micro-tuning is
+not producing a verified improvement.
+
 ## Boundary and next work
 
 The end-to-end CUDA encoder is now bit-exact and faster than the local AVX2
