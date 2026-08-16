@@ -108,11 +108,14 @@ CPU/CUDA stream and pixel validation, but were rejected on the smoke tier:
 | Serializer launch bounds | 126.561 |
 
 A read-only host-registration hint was also rejected because it changed both
-the CUDA stream and pixel hashes. No source candidate from this round is
-retained. The measurements reinforce the existing profiler conclusion: on
-this Pascal/WDDM system, a persistent-kernel or GPU-native surface design is
-needed for a credible next encoder gain; launch and transfer micro-tuning is
-not producing a verified improvement.
+the CUDA stream and pixel hashes. One selector-only candidate was subsequently
+retained: changing `select_quantisers_32x8` from
+`__launch_bounds__(256, 4)` to `__launch_bounds__(256, 8)` improved the full-tier
+CUDA encoder median from 212.874 fps to 242.813 fps (+14.1%). The matched quick
+medians were 206.039 fps and 216.827 fps (+5.2%). Both runs passed six native
+tests, exact CPU/CUDA stream and pixel hashes, and the full run validated two
+conformance streams. CUDA decoder throughput remained within run-to-run noise
+(70.592 fps on the candidate full run).
 
 ## Boundary and next work
 
