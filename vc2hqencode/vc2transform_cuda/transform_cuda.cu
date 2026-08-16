@@ -730,7 +730,7 @@ __global__ void encode_slices_32x8(
     output[offset++] = 0xff;
 }
 
-__global__ void __launch_bounds__(256, 4) select_quantisers_32x8(
+__global__ void __launch_bounds__(256, 8) select_quantisers_32x8(
     const int16_t *y_plane, const int16_t *cb_plane, const int16_t *cr_plane,
     int y_stride, int c_stride, const int *max_sizes, int n_slices,
     int slices_per_line, int slice_size_scalar, const uint16_t *matrix_m,
