@@ -23,6 +23,7 @@ size_t registered_output_bytes[3] = {};
 cudaStream_t streams[3] = {};
 cudaStream_t encode_stream = nullptr;
 cudaEvent_t transform_done[3] = {};
+cudaEvent_t encode_done = nullptr;
 int *device_max_sizes = nullptr;
 int *device_output_offsets = nullptr;
 uint8_t *device_qindices = nullptr;
@@ -1117,6 +1118,10 @@ bool vc2_cuda_encode_32x8_i16(const int *max_sizes,
       !cuda_ok(cudaStreamCreateWithFlags(&encode_stream, cudaStreamNonBlocking),
                "encoder stream creation"))
     return false;
+  if (!encode_done &&
+      !cuda_ok(cudaEventCreateWithFlags(&encode_done, cudaEventDisableTiming),
+               "encoder completion event creation"))
+    return false;
 
   const size_t integer_bytes = static_cast<size_t>(n_slices) * sizeof(int);
   const size_t qindex_bytes = static_cast<size_t>(n_slices);
@@ -1271,7 +1276,9 @@ bool vc2_cuda_encode_32x8_i16(const int *max_sizes,
       !cuda_ok(cudaMemcpyAsync(output, device_bitstream, static_cast<size_t>(output_bytes),
                                cudaMemcpyDeviceToHost, encode_stream),
                "bitstream download") ||
-      !cuda_ok(cudaStreamSynchronize(encode_stream), "encoder synchronization"))
+      !cuda_ok(cudaEventRecord(encode_done, encode_stream),
+               "encoder completion event") ||
+      !cuda_ok(cudaEventSynchronize(encode_done), "encoder synchronization"))
     return false;
   return true;
 }
