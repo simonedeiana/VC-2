@@ -117,6 +117,14 @@ tests, exact CPU/CUDA stream and pixel hashes, and the full run validated two
 conformance streams. CUDA decoder throughput remained within run-to-run noise
 (70.592 fps on the candidate full run).
 
+A second accepted follow-up replaced the final `cudaStreamSynchronize` with a
+persistent timing-disabled completion event and `cudaEventSynchronize` after
+the bitstream download. Nsight Systems over 30 frames measured 104.56 ms in
+the old stream waits and 102.51 ms in the event waits. The full-tier encoder
+median increased from 242.813 fps to 244.788 fps (+0.81%); the quick-tier
+medians were 207.732 fps and 215.280 fps (+3.63%). Exact hashes, six native
+tests, and two conformance validator streams remained green.
+
 ## Boundary and next work
 
 The end-to-end CUDA encoder is now bit-exact and faster than the local AVX2
